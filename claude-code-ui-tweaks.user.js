@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.32
+// @version      0.33
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -73,6 +73,10 @@
     up: 'Mod+Shift+ArrowUp',
     down: 'Mod+Shift+ArrowDown',
   };
+  // Opacity of the panes that are not active, when there are 2 or more
+  // panes (0.1 to 1). The active pane is the pane where you clicked or
+  // typed last. 1 = no dimming. The project chat is never dimmed.
+  const PANE_DIM = 0.55;
 
   // ---- Shared selectors -------------------------------------------------
   // NOTE: do not put :has() inside :has(). CSS does not permit it, and the
@@ -1395,6 +1399,15 @@ html.tm-in-split ${TILE_ROW} > [data-tile-divider] {
   position: absolute;
   pointer-events: auto;
 }
+/* Panes that are not active */
+.tm-pane,
+.tm-panes-host > .tiles-shell {
+  transition: opacity 120ms;
+}
+.tm-pane.tm-dim,
+.tm-panes-host.tm-main-dim > .tiles-shell {
+  opacity: ${PANE_DIM};
+}
 .tm-pane > iframe {
   display: block;
   width: 100%;
@@ -1468,6 +1481,10 @@ html.tm-split-dragging {
         e.stopPropagation();
         window.top.postMessage({ tmPane: action }, location.origin);
       }, true);
+      // Tell the top page when this pane becomes the active pane.
+      const active = () => window.top.postMessage({ tmPane: 'focus' }, location.origin);
+      window.addEventListener('pointerdown', active, true);
+      window.addEventListener('focus', active);
       // The X button of the pane closes the pane. Without this, it goes
       // back to the threads list (the "Threads" link does that too).
       window.addEventListener('click', (e) => {
@@ -1567,14 +1584,28 @@ html.tm-split-dragging {
     let holder = null;
     const frames = new Map(); // leaf id -> {pane, frame}
     let handles = [];
+    let active = 'main'; // id of the active pane
     const pct = (v) => `${(v * 100).toFixed(4)}%`;
     const setIf = (el, prop, value) => {
       if (el.style.getPropertyValue(prop) !== value) el.style.setProperty(prop, value);
     };
 
+    // Dim the panes that are not active.
+    function showActive() {
+      if (!pathTo(active)) active = 'main';
+      const host = holder && holder.parentElement;
+      if (host) host.classList.toggle('tm-main-dim', active !== 'main');
+      for (const [id, rec] of frames) rec.pane.classList.toggle('tm-dim', id !== active);
+    }
+    function setActive(id) {
+      if (id === active) return;
+      active = id;
+      showActive();
+    }
+
     function clear() {
       document.querySelectorAll('.tm-panes-host').forEach((el) => {
-        el.classList.remove('tm-panes-host');
+        el.classList.remove('tm-panes-host', 'tm-main-dim');
         ['--tm-main-x', '--tm-main-y', '--tm-main-w', '--tm-main-h'].forEach((p) => el.style.removeProperty(p));
       });
       if (holder) holder.remove();
@@ -1633,6 +1664,7 @@ html.tm-split-dragging {
         rec.pane.remove();
         frames.delete(id);
       }
+      showActive();
       // The divider lines.
       while (handles.length > lines.length) handles.pop().el.remove();
       lines.forEach((line, i) => {
@@ -1728,6 +1760,7 @@ html.tm-split-dragging {
       }
       write();
       render();
+      setActive(fresh.id);
       const rec = frames.get(fresh.id);
       if (rec) rec.frame.focus();
     }
@@ -1750,6 +1783,7 @@ html.tm-split-dragging {
       }
       write();
       render();
+      setActive('main');
       window.focus();
     }
 
@@ -1788,19 +1822,29 @@ html.tm-split-dragging {
       else if (action === 'up') resize(id, 'col', -1);
       else if (action === 'down') resize(id, 'col', 1);
     }
-    // A key in the top page is for the pane of the page ('main').
+    // A click or the focus in the pane of the page makes it the active pane.
+    // The project chat does not change the active pane.
+    const inMain = (e) => {
+      if (e.target.closest && e.target.closest('.tm-panes-host > .tiles-shell')) setActive('main');
+    };
+    window.addEventListener('pointerdown', inMain, true);
+    window.addEventListener('focusin', inMain, true);
+    // A key in the top page is for the active pane.
     window.addEventListener('keydown', (e) => {
       const action = paneAction(e);
       if (!action) return;
       e.preventDefault();
       e.stopPropagation();
-      run(action, 'main');
+      run(action, active);
     }, true);
     // A key in a frame is for the pane of that frame.
     window.addEventListener('message', (e) => {
       if (e.origin !== location.origin || !e.data || !e.data.tmPane) return;
       for (const [id, rec] of frames) {
-        if (e.source === rec.frame.contentWindow) run(String(e.data.tmPane), id);
+        if (e.source !== rec.frame.contentWindow) continue;
+        setActive(id);
+        if (e.data.tmPane !== 'focus') run(String(e.data.tmPane), id);
+        break;
       }
     });
 
