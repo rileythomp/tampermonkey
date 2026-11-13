@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.28
+// @version      0.29
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -16,6 +16,7 @@
   //   Shared selectors  for the artifacts-beside-prs tweak
   //   Theme values      colors and tokens for slack-theme
   //   Thread drag       CSS and code for thread-drag-sections
+  //   Split panes       CSS and code for split-panes
   //   Tweaks            the list of tweaks (id, enabled, css, init)
   //   Loader            adds the CSS and runs init() of each enabled tweak
   // Each tweak adds a <style id="tm-tweak-<id>">. Names that start with
@@ -53,6 +54,11 @@
   // A section with moved threads shows this number of threads. "Show more"
   // shows the others. The page uses the same number.
   const THREAD_PAGE = 5;
+  // Keys for the split-panes tweak (Cmd on a Mac, Ctrl on other systems).
+  // Cmd+\ opens a second pane at the right. Cmd+Shift+\ closes it.
+  // Drag the line between the panes to change their widths.
+  // Double-click the line to make the panes equal.
+  const SPLIT_KEY = 'Backslash';
 
   // ---- Shared selectors -------------------------------------------------
   // NOTE: do not put :has() inside :has(). CSS does not permit it, and the
@@ -1318,6 +1324,260 @@
     else document.addEventListener('DOMContentLoaded', start);
   }
 
+  // ---- Split panes ------------------------------------------------------
+  // The page shows one thread at a time. The split-panes tweak adds a
+  // second pane at the right of the page. The pane holds a frame that
+  // loads the same project page (same origin, so the frame is permitted).
+  // In the frame, this script hides the project chat, so that the frame
+  // shows only its thread pane. Use the "Threads" link in the frame to
+  // open a different thread there.
+  //
+  // The page puts its panes ("tiles") in one flex row: chat slot, divider,
+  // thread slot. The script adds its divider and its pane at the end of
+  // that row. It does not move the nodes of the page.
+  //
+  // The state is in localStorage (one record for each project):
+  // {open, frac, url}. frac is the width of the second pane (0..1).
+  const SPLIT_FRAME = 'tm-split-frame';
+  const IN_SPLIT = (() => {
+    try {
+      return window.top !== window && !!window.frameElement &&
+        window.frameElement.classList.contains(SPLIT_FRAME);
+    } catch (e) {
+      return false;
+    }
+  })();
+  // The flex row of the page that holds the panes.
+  const TILE_ROW = 'div:has(> [data-tile-divider])';
+
+  const SPLIT_CSS = `
+/* In the frame: hide the project chat and its divider. */
+html.tm-in-split ${TILE_ROW} > div:has([data-project-chat-tile]),
+html.tm-in-split ${TILE_ROW} > [data-tile-divider] {
+  display: none !important;
+}
+.tm-split-handle {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 1px;
+  z-index: 4;
+  cursor: col-resize;
+  touch-action: none;
+  background: hsl(var(--border-300, 0 0% 50%) / 0.25);
+}
+/* A wider area to grab, on both sides of the line */
+.tm-split-handle::before {
+  content: '';
+  position: absolute;
+  inset: 0 -4px;
+}
+.tm-split-handle:hover,
+.tm-split-handle.tm-dragging {
+  background: hsl(var(--accent-brand, 210 100% 60%) / 0.8);
+}
+.tm-split-pane {
+  position: relative;
+  min-width: 280px;
+  min-height: 100px;
+  display: flex;
+}
+.tm-split-pane > iframe {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+/* The frame must not take the mouse while you drag the line */
+html.tm-split-dragging iframe {
+  pointer-events: none !important;
+}
+html.tm-split-dragging {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+`;
+
+  // Returns 'open', 'close' or '' for a keydown event.
+  function splitAction(e) {
+    if (e.code !== SPLIT_KEY || e.altKey) return '';
+    const mod = /Mac/.test(navigator.platform) ? e.metaKey : e.ctrlKey;
+    if (!mod) return '';
+    return e.shiftKey ? 'close' : 'open';
+  }
+
+  function initSplit() {
+    if (IN_SPLIT) {
+      // Frame: mark the page, and send the keys to the top page.
+      document.documentElement.classList.add('tm-in-split');
+      window.addEventListener('keydown', (e) => {
+        const action = splitAction(e);
+        if (!action) return;
+        e.preventDefault();
+        e.stopPropagation();
+        window.top.postMessage({ tmSplit: action }, location.origin);
+      }, true);
+      return;
+    }
+    if (window.top !== window) return; // some other frame
+
+    const keyFor = () => `tm-split:${location.pathname}`;
+    const read = () => {
+      try {
+        return JSON.parse(localStorage.getItem(keyFor())) || {};
+      } catch (e) {
+        return {};
+      }
+    };
+    const write = (st) => {
+      try {
+        localStorage.setItem(keyFor(), JSON.stringify(st));
+      } catch (e) { /* storage is not available */ }
+    };
+    // The project page without a thread: the frame shows the threads list.
+    const projectUrl = () => location.origin + location.pathname;
+    const clampFrac = (f) => Math.min(0.8, Math.max(0.2, Number(f) || 0.5));
+
+    let state = read();
+    let path = location.pathname;
+    let handle = null;
+    let pane = null;
+    let frame = null;
+
+    function build() {
+      handle = document.createElement('div');
+      handle.className = 'tm-split-handle';
+      handle.setAttribute('role', 'separator');
+      handle.setAttribute('aria-orientation', 'vertical');
+      handle.title = 'Drag to resize. Double-click: equal widths.';
+      pane = document.createElement('div');
+      pane.className = 'tm-split-pane';
+      frame = document.createElement('iframe');
+      frame.className = SPLIT_FRAME;
+      frame.src = state.url || projectUrl();
+      pane.appendChild(frame);
+      handle.addEventListener('pointerdown', startDrag);
+      handle.addEventListener('dblclick', () => {
+        state.frac = 0.5;
+        write(state);
+        applyWidth();
+      });
+    }
+
+    function applyWidth() {
+      if (pane) pane.style.flex = `0 0 ${clampFrac(state.frac) * 100}%`;
+    }
+
+    // Put the divider and the pane at the end of the row of the page.
+    // The page can draw the row again; then attach them again.
+    function place() {
+      if (!state.open) return;
+      const row = document.querySelector(TILE_ROW);
+      if (!row) return;
+      if (!pane) build();
+      if (row.lastElementChild !== pane || pane.previousElementSibling !== handle) {
+        row.appendChild(handle);
+        row.appendChild(pane);
+      }
+      applyWidth();
+    }
+
+    function open() {
+      if (state.open) {
+        if (frame) frame.focus();
+        return;
+      }
+      state = { ...state, open: true, frac: clampFrac(state.frac) };
+      write(state);
+      place();
+    }
+
+    function close() {
+      state = { ...state, open: false };
+      write(state);
+      if (handle) handle.remove();
+      if (pane) pane.remove();
+      handle = pane = frame = null;
+    }
+
+    function startDrag(e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const row = handle.parentElement;
+      const box = row.getBoundingClientRect();
+      handle.setPointerCapture(e.pointerId);
+      handle.classList.add('tm-dragging');
+      document.documentElement.classList.add('tm-split-dragging');
+      const move = (ev) => {
+        state.frac = clampFrac((box.right - ev.clientX) / box.width);
+        applyWidth();
+      };
+      const up = () => {
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', up);
+        handle.removeEventListener('pointercancel', up);
+        handle.classList.remove('tm-dragging');
+        document.documentElement.classList.remove('tm-split-dragging');
+        write(state);
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', up);
+      handle.addEventListener('pointercancel', up);
+    }
+
+    const run = (action) => (action === 'open' ? open() : action === 'close' ? close() : null);
+    window.addEventListener('keydown', (e) => {
+      const action = splitAction(e);
+      if (!action) return;
+      e.preventDefault();
+      e.stopPropagation();
+      run(action);
+    }, true);
+    window.addEventListener('message', (e) => {
+      if (e.origin !== location.origin || !e.data || !e.data.tmSplit) return;
+      if (!frame || e.source !== frame.contentWindow) return;
+      run(e.data.tmSplit);
+    });
+
+    // Each second: remember the URL of the frame, and follow a change of
+    // project in the top page (the app changes the URL without a reload).
+    setInterval(() => {
+      if (location.pathname !== path) {
+        path = location.pathname;
+        if (handle) handle.remove();
+        if (pane) pane.remove();
+        handle = pane = frame = null;
+        state = read();
+        place();
+        return;
+      }
+      if (!frame) return;
+      try {
+        const url = frame.contentWindow.location.href;
+        if (url && url !== 'about:blank' && url !== state.url) {
+          state.url = url;
+          write(state);
+        }
+      } catch (e) { /* the frame is not ready */ }
+    }, 1000);
+
+    const start = () => {
+      let queued = false;
+      new MutationObserver(() => {
+        if (queued || !state.open) return;
+        queued = true;
+        requestAnimationFrame(() => {
+          queued = false;
+          place();
+        });
+      }).observe(document.body, { childList: true, subtree: true });
+      place();
+    };
+    if (document.body) start();
+    else document.addEventListener('DOMContentLoaded', start);
+  }
+
   // ---- Tweaks -----------------------------------------------------------
   // To add a change: add an entry with an id, an enabled flag, and css.
   // An optional init() function is for changes that need JavaScript.
@@ -1651,6 +1911,14 @@ code[data-epitaxy-inline-code],
       enabled: true,
       css: THREAD_DRAG_CSS,
       init: initThreadDrag,
+    },
+    {
+      // A second thread pane at the right of the page, with a divider that
+      // you can drag. See "Split panes" above and SPLIT_KEY at the top.
+      id: 'split-panes',
+      enabled: true,
+      css: SPLIT_CSS,
+      init: initSplit,
     },
     {
       // No bold text: regular weight (400) for all text, also for
