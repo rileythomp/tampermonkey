@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.27
+// @version      0.28
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -506,6 +506,17 @@
   const HUMAN = '[data-perf-row="human"]';
   const ASSISTANT = '[data-perf-row="assistant"]';
   const MSG = '[data-row-chrome]';
+  // The page also has empty assistant rows (no message box in them).
+  const EMPTY = `${ASSISTANT}:not(:has(${MSG}))`;
+  // An assistant row that comes after a different assistant message (an
+  // empty row can be between them). It shows no avatar and no name.
+  const BOT_NEXT = `:is(${ASSISTANT}:has(${MSG}) + ${ASSISTANT}, ${ASSISTANT}:has(${MSG}) + ${EMPTY} + ${ASSISTANT})`;
+  // A row where the sender changes.
+  const SENDER_CHANGE = [
+    `${HUMAN} + ${ASSISTANT}`,
+    `${ASSISTANT} + ${HUMAN}`,
+    `${HUMAN} + ${EMPTY} + ${ASSISTANT}`,
+  ];
   // The column that holds the message content (1 or 2 levels down).
   const nameSel = (row) =>
     `${row} ${MSG} > .flex-col::before, ${row} ${MSG} > div > .flex-col::before`;
@@ -1467,10 +1478,20 @@ ${
 }`
     : ''
 }
-/* A thin line where the sender changes. A box-shadow does not change
-   the height of the row. */
-${HUMAN} + ${ASSISTANT}, ${ASSISTANT} + ${HUMAN} {
-  box-shadow: 0 -1px 0 var(--cds-border-line) !important;
+/* A thin line where the sender changes, in the middle of the gap
+   between the two messages (the gap is 12px + 8px here) */
+${SENDER_CHANGE.join(', ')} {
+  padding-top: 8px !important;
+}
+${SENDER_CHANGE.map((row) => `${row} ${MSG}::before`).join(', ')} {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -11px;
+  height: 1px;
+  background: var(--cds-border-line);
+  pointer-events: none;
 }
 /* Name above the message */
 ${nameSel(HUMAN)}, ${nameSel(ASSISTANT)} {
@@ -1484,10 +1505,10 @@ ${nameSel(HUMAN)} { content: ${cssStr(ME)}; }
 ${nameSel(ASSISTANT)} { content: ${cssStr(BOT)}; }
 /* As in Slack: no avatar and no name when the sender is the same as in
    the row before */
-${ASSISTANT} + ${ASSISTANT} ${MSG}::after, ${HUMAN} + ${HUMAN} ${MSG}::after {
+${BOT_NEXT} ${MSG}::after, ${HUMAN} + ${HUMAN} ${MSG}::after {
   display: none;
 }
-${nameSel(`${ASSISTANT} + ${ASSISTANT}`)}, ${nameSel(`${HUMAN} + ${HUMAN}`)} {
+${nameSel(`${BOT_NEXT}`)}, ${nameSel(`${HUMAN} + ${HUMAN}`)} {
   display: none;
 }
 /* Time. As in Slack: next to the name, always shown. The name widths
@@ -1509,14 +1530,14 @@ ${HUMAN} ${MSG} ${TIME} {
   left: calc(var(--tm-name-me, 5ch) + 8px) !important;
 }
 /* A message without a name: the time shows in the avatar column on hover */
-${ASSISTANT} + ${ASSISTANT} ${MSG} ${TIME}, ${HUMAN} + ${HUMAN} ${MSG} ${TIME} {
+${BOT_NEXT} ${MSG} ${TIME}, ${HUMAN} + ${HUMAN} ${MSG} ${TIME} {
   left: -56px !important;
   width: 48px;
   justify-content: center;
   font-size: 10px !important;
   opacity: 0 !important;
 }
-${ASSISTANT} + ${ASSISTANT} ${MSG}:hover ${TIME}, ${HUMAN} + ${HUMAN} ${MSG}:hover ${TIME} {
+${BOT_NEXT} ${MSG}:hover ${TIME}, ${HUMAN} + ${HUMAN} ${MSG}:hover ${TIME} {
   opacity: 1 !important;
 }
 /* Coordinator pane, your messages: move the time line from below the
