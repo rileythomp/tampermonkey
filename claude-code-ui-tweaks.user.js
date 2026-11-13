@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.30
+// @version      0.31
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -1365,6 +1365,8 @@
   })();
   // The flex row of the page that holds the chat slot and the thread slot.
   const TILE_ROW = 'div:has(> [data-tile-divider])';
+  // The X button in the top bar of a thread pane.
+  const PANE_CLOSE = '[data-pane-root] button[aria-label="Close"]';
 
   const SPLIT_CSS = `
 /* In a frame: hide the project chat and its divider. */
@@ -1453,6 +1455,14 @@ html.tm-split-dragging {
         e.preventDefault();
         e.stopPropagation();
         window.top.postMessage({ tmPane: action }, location.origin);
+      }, true);
+      // The X button of the pane closes the pane. Without this, it goes
+      // back to the threads list (the "Threads" link does that too).
+      window.addEventListener('click', (e) => {
+        if (!e.target.closest || !e.target.closest(PANE_CLOSE)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        window.top.postMessage({ tmPane: 'close' }, location.origin);
       }, true);
       return;
     }
