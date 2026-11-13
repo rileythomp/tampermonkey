@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.29
+// @version      0.30
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -54,11 +54,22 @@
   // A section with moved threads shows this number of threads. "Show more"
   // shows the others. The page uses the same number.
   const THREAD_PAGE = 5;
-  // Keys for the split-panes tweak (Cmd on a Mac, Ctrl on other systems).
-  // Cmd+\ opens a second pane at the right. Cmd+Shift+\ closes it.
-  // Drag the line between the panes to change their widths.
-  // Double-click the line to make the panes equal.
-  const SPLIT_KEY = 'Backslash';
+  // Keys for the split-panes tweak. A key acts on the pane that has the
+  // focus (the pane where you clicked or typed last).
+  // Mod is Cmd on a Mac and Ctrl on other systems. Alt is Option on a Mac.
+  // The last part is a key code (KeyboardEvent.code).
+  // The arrow keys move one edge of the pane in the direction of the arrow:
+  // the right or bottom edge, or the left or top edge when the pane is at
+  // the right or bottom end. You can also drag the lines between the panes.
+  const PANE_KEYS = {
+    splitRight: 'Mod+Backslash', // new pane at the right of this pane
+    splitDown: 'Mod+Shift+Backslash', // new pane below this pane
+    close: 'Ctrl+Alt+KeyW', // close this pane (not the first pane)
+    left: 'Ctrl+Alt+ArrowLeft',
+    right: 'Ctrl+Alt+ArrowRight',
+    up: 'Ctrl+Alt+ArrowUp',
+    down: 'Ctrl+Alt+ArrowDown',
+  };
 
   // ---- Shared selectors -------------------------------------------------
   // NOTE: do not put :has() inside :has(). CSS does not permit it, and the
@@ -1325,19 +1336,24 @@
   }
 
   // ---- Split panes ------------------------------------------------------
-  // The page shows one thread at a time. The split-panes tweak adds a
-  // second pane at the right of the page. The pane holds a frame that
+  // The page shows one thread at a time. The split-panes tweak divides the
+  // thread area into panes, as a text editor does. The first pane ("main")
+  // is the thread pane of the page. Each other pane holds a frame that
   // loads the same project page (same origin, so the frame is permitted).
-  // In the frame, this script hides the project chat, so that the frame
-  // shows only its thread pane. Use the "Threads" link in the frame to
-  // open a different thread there.
+  // In a frame, this script hides the project chat, so that the frame
+  // shows only its thread pane. Use the "Threads" link in a frame to open
+  // a different thread there.
   //
   // The page puts its panes ("tiles") in one flex row: chat slot, divider,
-  // thread slot. The script adds its divider and its pane at the end of
-  // that row. It does not move the nodes of the page.
+  // thread slot. The script works only in the thread slot, so the width of
+  // the project chat does not change. It does not move the nodes of the
+  // page: it gives the page's pane a position in the slot, and it adds the
+  // frames and the divider lines in one holder at the end of the slot.
   //
-  // The state is in localStorage (one record for each project):
-  // {open, frac, url}. frac is the width of the second pane (0..1).
+  // The layout is a tree, saved in localStorage for each project:
+  //   leaf:  {id: 'main'} or {id: 'p3', url}
+  //   split: {dir: 'row' | 'col', kids: [node, ...], sizes: [0..1, ...]}
+  // 'row' puts the kids side by side. 'col' puts them top to bottom.
   const SPLIT_FRAME = 'tm-split-frame';
   const IN_SPLIT = (() => {
     try {
@@ -1347,232 +1363,462 @@
       return false;
     }
   })();
-  // The flex row of the page that holds the panes.
+  // The flex row of the page that holds the chat slot and the thread slot.
   const TILE_ROW = 'div:has(> [data-tile-divider])';
 
   const SPLIT_CSS = `
-/* In the frame: hide the project chat and its divider. */
+/* In a frame: hide the project chat and its divider. */
 html.tm-in-split ${TILE_ROW} > div:has([data-project-chat-tile]),
 html.tm-in-split ${TILE_ROW} > [data-tile-divider] {
   display: none !important;
 }
-.tm-split-handle {
-  position: relative;
-  flex: 0 0 auto;
-  align-self: stretch;
-  width: 1px;
-  z-index: 4;
-  cursor: col-resize;
-  touch-action: none;
-  background: hsl(var(--border-300, 0 0% 50%) / 0.25);
+/* The pane of the page gets the rectangle of the 'main' leaf. */
+.tm-panes-host > .tiles-shell {
+  position: absolute !important;
+  left: var(--tm-main-x) !important;
+  top: var(--tm-main-y) !important;
+  width: var(--tm-main-w) !important;
+  height: var(--tm-main-h) !important;
 }
-/* A wider area to grab, on both sides of the line */
-.tm-split-handle::before {
-  content: '';
+.tm-panes {
   position: absolute;
-  inset: 0 -4px;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
 }
-.tm-split-handle:hover,
-.tm-split-handle.tm-dragging {
-  background: hsl(var(--accent-brand, 210 100% 60%) / 0.8);
+.tm-pane {
+  position: absolute;
+  pointer-events: auto;
 }
-.tm-split-pane {
-  position: relative;
-  min-width: 280px;
-  min-height: 100px;
-  display: flex;
-}
-.tm-split-pane > iframe {
-  flex: 1 1 auto;
+.tm-pane > iframe {
+  display: block;
   width: 100%;
   height: 100%;
   border: 0;
   background: transparent;
 }
-/* The frame must not take the mouse while you drag the line */
+.tm-split-handle {
+  position: absolute;
+  pointer-events: auto;
+  z-index: 1;
+  touch-action: none;
+  background: hsl(var(--border-300, 0 0% 50%) / 0.25);
+}
+.tm-split-handle[data-dir="row"] { width: 1px; cursor: col-resize; }
+.tm-split-handle[data-dir="col"] { height: 1px; cursor: row-resize; }
+/* A wider area to grab, on both sides of the line */
+.tm-split-handle::before {
+  content: '';
+  position: absolute;
+}
+.tm-split-handle[data-dir="row"]::before { inset: 0 -4px; }
+.tm-split-handle[data-dir="col"]::before { inset: -4px 0; }
+.tm-split-handle:hover,
+.tm-split-handle.tm-dragging {
+  background: hsl(var(--accent-brand, 210 100% 60%) / 0.8);
+}
+/* The frames must not take the mouse while you drag a line */
 html.tm-split-dragging iframe {
   pointer-events: none !important;
 }
 html.tm-split-dragging {
-  cursor: col-resize !important;
   user-select: none !important;
 }
 `;
 
-  // Returns 'open', 'close' or '' for a keydown event.
-  function splitAction(e) {
-    if (e.code !== SPLIT_KEY || e.altKey) return '';
-    const mod = /Mac/.test(navigator.platform) ? e.metaKey : e.ctrlKey;
-    if (!mod) return '';
-    return e.shiftKey ? 'close' : 'open';
+  // Returns the name of the pane action for a keydown event, or ''.
+  function paneAction(e) {
+    const mac = /Mac/.test(navigator.platform);
+    for (const [action, key] of Object.entries(PANE_KEYS)) {
+      const parts = key.split('+');
+      const code = parts.pop();
+      if (e.code !== code) continue;
+      const want = (name) => parts.includes(name);
+      const meta = mac && want('Mod');
+      const ctrl = want('Ctrl') || (!mac && want('Mod'));
+      if (e.metaKey !== meta || e.ctrlKey !== ctrl) continue;
+      if (e.altKey !== want('Alt') || e.shiftKey !== want('Shift')) continue;
+      return action;
+    }
+    return '';
   }
 
   function initSplit() {
     if (IN_SPLIT) {
-      // Frame: mark the page, and send the keys to the top page.
+      // Frame: mark the page, and send the pane keys to the top page.
       document.documentElement.classList.add('tm-in-split');
       window.addEventListener('keydown', (e) => {
-        const action = splitAction(e);
+        const action = paneAction(e);
         if (!action) return;
         e.preventDefault();
         e.stopPropagation();
-        window.top.postMessage({ tmSplit: action }, location.origin);
+        window.top.postMessage({ tmPane: action }, location.origin);
       }, true);
       return;
     }
     if (window.top !== window) return; // some other frame
 
-    const keyFor = () => `tm-split:${location.pathname}`;
-    const read = () => {
-      try {
-        return JSON.parse(localStorage.getItem(keyFor())) || {};
-      } catch (e) {
-        return {};
-      }
-    };
-    const write = (st) => {
-      try {
-        localStorage.setItem(keyFor(), JSON.stringify(st));
-      } catch (e) { /* storage is not available */ }
-    };
-    // The project page without a thread: the frame shows the threads list.
+    const MIN = 0.1; // smallest part of a split that one pane can have
+    const STEP = 0.05; // one key press moves a line by this part
+    const keyFor = () => `tm-panes:${location.pathname}`;
+    // The project page without a thread: a new pane shows the threads list.
     const projectUrl = () => location.origin + location.pathname;
-    const clampFrac = (f) => Math.min(0.8, Math.max(0.2, Number(f) || 0.5));
+    const isLeaf = (n) => !n.kids;
+
+    function validNode(n) {
+      if (!n || typeof n !== 'object') return false;
+      if (!n.kids) return typeof n.id === 'string';
+      return (n.dir === 'row' || n.dir === 'col') &&
+        Array.isArray(n.kids) && n.kids.length > 1 &&
+        Array.isArray(n.sizes) && n.sizes.length === n.kids.length &&
+        n.sizes.every((s) => s > 0) && n.kids.every(validNode);
+    }
+    function read() {
+      let st = null;
+      try {
+        st = JSON.parse(localStorage.getItem(keyFor()));
+      } catch (e) { /* not JSON */ }
+      if (st && validNode(st.tree) && leaves(st.tree).some((l) => l.id === 'main')) {
+        return { tree: st.tree, next: Number(st.next) || 1 };
+      }
+      // Record of version 0.29: one pane at the right.
+      try {
+        const oldKey = `tm-split:${location.pathname}`;
+        const old = JSON.parse(localStorage.getItem(oldKey));
+        localStorage.removeItem(oldKey);
+        if (old && old.open) {
+          const f = Math.min(0.8, Math.max(0.2, Number(old.frac) || 0.5));
+          return {
+            tree: { dir: 'row', kids: [{ id: 'main' }, { id: 'p1', url: old.url }], sizes: [1 - f, f] },
+            next: 2,
+          };
+        }
+      } catch (e) { /* no old record */ }
+      return { tree: { id: 'main' }, next: 1 };
+    }
+    function write() {
+      try {
+        localStorage.setItem(keyFor(), JSON.stringify(state));
+      } catch (e) { /* storage is not available */ }
+    }
+
+    function leaves(n, out = []) {
+      if (isLeaf(n)) out.push(n);
+      else n.kids.forEach((k) => leaves(k, out));
+      return out;
+    }
+    // The list of nodes from the root down to the leaf with this id.
+    function pathTo(id, n = state.tree, path = []) {
+      path.push(n);
+      if (isLeaf(n)) {
+        if (n.id === id) return path;
+      } else {
+        for (const k of n.kids) {
+          const found = pathTo(id, k, path);
+          if (found) return found;
+        }
+      }
+      path.pop();
+      return null;
+    }
+    // Rectangles (parts of the slot, 0..1) of the leaves and of the lines.
+    function layout(n, r, out) {
+      if (isLeaf(n)) {
+        out.panes.push({ leaf: n, r });
+        return out;
+      }
+      const row = n.dir === 'row';
+      const total = n.sizes.reduce((a, b) => a + b, 0);
+      let at = row ? r.x : r.y;
+      n.kids.forEach((k, i) => {
+        const part = (n.sizes[i] / total) * (row ? r.w : r.h);
+        const kr = row ? { x: at, y: r.y, w: part, h: r.h } : { x: r.x, y: at, w: r.w, h: part };
+        layout(k, kr, out);
+        at += part;
+        if (i < n.kids.length - 1) out.lines.push({ node: n, i, at, r });
+      });
+      return out;
+    }
 
     let state = read();
     let path = location.pathname;
-    let handle = null;
-    let pane = null;
-    let frame = null;
+    let holder = null;
+    const frames = new Map(); // leaf id -> {pane, frame}
+    let handles = [];
+    const pct = (v) => `${(v * 100).toFixed(4)}%`;
+    const setIf = (el, prop, value) => {
+      if (el.style.getPropertyValue(prop) !== value) el.style.setProperty(prop, value);
+    };
 
-    function build() {
-      handle = document.createElement('div');
-      handle.className = 'tm-split-handle';
-      handle.setAttribute('role', 'separator');
-      handle.setAttribute('aria-orientation', 'vertical');
-      handle.title = 'Drag to resize. Double-click: equal widths.';
-      pane = document.createElement('div');
-      pane.className = 'tm-split-pane';
-      frame = document.createElement('iframe');
-      frame.className = SPLIT_FRAME;
-      frame.src = state.url || projectUrl();
-      pane.appendChild(frame);
-      handle.addEventListener('pointerdown', startDrag);
-      handle.addEventListener('dblclick', () => {
-        state.frac = 0.5;
-        write(state);
-        applyWidth();
+    function clear() {
+      document.querySelectorAll('.tm-panes-host').forEach((el) => {
+        el.classList.remove('tm-panes-host');
+        ['--tm-main-x', '--tm-main-y', '--tm-main-w', '--tm-main-h'].forEach((p) => el.style.removeProperty(p));
+      });
+      if (holder) holder.remove();
+      holder = null;
+      frames.clear();
+      handles = [];
+    }
+
+    function render() {
+      const row = document.querySelector(TILE_ROW);
+      // The thread slot: the last slot of the row that holds panes.
+      const slot = row && [...row.children].filter((el) => el.querySelector(':scope > .tiles-shell')).pop();
+      if (isLeaf(state.tree) || !slot || slot.querySelector('[data-project-chat-tile]')) {
+        if (isLeaf(state.tree)) clear();
+        return;
+      }
+      if (!holder) {
+        holder = document.createElement('div');
+        holder.className = 'tm-panes';
+      }
+      if (holder.parentElement !== slot) {
+        document.querySelectorAll('.tm-panes-host').forEach((el) => el !== slot && el.classList.remove('tm-panes-host'));
+        slot.appendChild(holder);
+      }
+      slot.classList.add('tm-panes-host');
+      const { panes, lines } = layout(state.tree, { x: 0, y: 0, w: 1, h: 1 }, { panes: [], lines: [] });
+      const seen = new Set();
+      for (const { leaf, r } of panes) {
+        if (leaf.id === 'main') {
+          setIf(slot, '--tm-main-x', pct(r.x));
+          setIf(slot, '--tm-main-y', pct(r.y));
+          setIf(slot, '--tm-main-w', pct(r.w));
+          setIf(slot, '--tm-main-h', pct(r.h));
+          continue;
+        }
+        seen.add(leaf.id);
+        let rec = frames.get(leaf.id);
+        if (!rec) {
+          const pane = document.createElement('div');
+          pane.className = 'tm-pane';
+          const frame = document.createElement('iframe');
+          frame.className = SPLIT_FRAME;
+          frame.src = leaf.url || projectUrl();
+          pane.appendChild(frame);
+          rec = { pane, frame };
+          frames.set(leaf.id, rec);
+        }
+        if (rec.pane.parentElement !== holder) holder.appendChild(rec.pane);
+        setIf(rec.pane, 'left', pct(r.x));
+        setIf(rec.pane, 'top', pct(r.y));
+        setIf(rec.pane, 'width', pct(r.w));
+        setIf(rec.pane, 'height', pct(r.h));
+      }
+      for (const [id, rec] of frames) {
+        if (seen.has(id)) continue;
+        rec.pane.remove();
+        frames.delete(id);
+      }
+      // The divider lines.
+      while (handles.length > lines.length) handles.pop().el.remove();
+      lines.forEach((line, i) => {
+        let h = handles[i];
+        if (!h) {
+          const el = document.createElement('div');
+          el.className = 'tm-split-handle';
+          el.setAttribute('role', 'separator');
+          el.title = 'Drag to resize. Double-click: equal sizes.';
+          h = { el, line };
+          el.addEventListener('pointerdown', (e) => startDrag(e, h));
+          el.addEventListener('dblclick', () => {
+            const { node, i: k } = h.line;
+            const half = (node.sizes[k] + node.sizes[k + 1]) / 2;
+            node.sizes[k] = node.sizes[k + 1] = half;
+            write();
+            render();
+          });
+          handles.push(h);
+        }
+        h.line = line;
+        if (h.el.parentElement !== holder) holder.appendChild(h.el);
+        const rowDir = line.node.dir === 'row';
+        if (h.el.dataset.dir !== line.node.dir) h.el.dataset.dir = line.node.dir;
+        setIf(h.el, 'left', pct(rowDir ? line.at : line.r.x));
+        setIf(h.el, 'top', pct(rowDir ? line.r.y : line.at));
+        setIf(h.el, 'width', rowDir ? '' : pct(line.r.w));
+        setIf(h.el, 'height', rowDir ? pct(line.r.h) : '');
       });
     }
 
-    function applyWidth() {
-      if (pane) pane.style.flex = `0 0 ${clampFrac(state.frac) * 100}%`;
+    // Move the line after kid i of a split by d (a part of the split).
+    function moveLine(node, i, d) {
+      const total = node.sizes.reduce((a, b) => a + b, 0);
+      const pair = node.sizes[i] + node.sizes[i + 1];
+      const min = Math.min(MIN * total, pair / 2);
+      const a = Math.min(pair - min, Math.max(min, node.sizes[i] + d * total));
+      node.sizes[i] = a;
+      node.sizes[i + 1] = pair - a;
     }
 
-    // Put the divider and the pane at the end of the row of the page.
-    // The page can draw the row again; then attach them again.
-    function place() {
-      if (!state.open) return;
-      const row = document.querySelector(TILE_ROW);
-      if (!row) return;
-      if (!pane) build();
-      if (row.lastElementChild !== pane || pane.previousElementSibling !== handle) {
-        row.appendChild(handle);
-        row.appendChild(pane);
-      }
-      applyWidth();
-    }
-
-    function open() {
-      if (state.open) {
-        if (frame) frame.focus();
-        return;
-      }
-      state = { ...state, open: true, frac: clampFrac(state.frac) };
-      write(state);
-      place();
-    }
-
-    function close() {
-      state = { ...state, open: false };
-      write(state);
-      if (handle) handle.remove();
-      if (pane) pane.remove();
-      handle = pane = frame = null;
-    }
-
-    function startDrag(e) {
-      if (e.button !== 0) return;
+    function startDrag(e, h) {
+      if (e.button !== 0 || !holder) return;
       e.preventDefault();
-      const row = handle.parentElement;
-      const box = row.getBoundingClientRect();
-      handle.setPointerCapture(e.pointerId);
-      handle.classList.add('tm-dragging');
-      document.documentElement.classList.add('tm-split-dragging');
+      const { node, i, r } = h.line;
+      const rowDir = node.dir === 'row';
+      const box = holder.getBoundingClientRect();
+      // The extent of the split, in pixels.
+      const size = rowDir ? r.w * box.width : r.h * box.height;
+      let last = rowDir ? e.clientX : e.clientY;
+      h.el.setPointerCapture(e.pointerId);
+      h.el.classList.add('tm-dragging');
+      const root = document.documentElement;
+      root.classList.add('tm-split-dragging');
+      root.style.setProperty('cursor', rowDir ? 'col-resize' : 'row-resize', 'important');
       const move = (ev) => {
-        state.frac = clampFrac((box.right - ev.clientX) / box.width);
-        applyWidth();
+        const now = rowDir ? ev.clientX : ev.clientY;
+        if (!size || now === last) return;
+        moveLine(node, i, (now - last) / size);
+        last = now;
+        render();
       };
       const up = () => {
-        handle.removeEventListener('pointermove', move);
-        handle.removeEventListener('pointerup', up);
-        handle.removeEventListener('pointercancel', up);
-        handle.classList.remove('tm-dragging');
-        document.documentElement.classList.remove('tm-split-dragging');
-        write(state);
+        h.el.removeEventListener('pointermove', move);
+        h.el.removeEventListener('pointerup', up);
+        h.el.removeEventListener('pointercancel', up);
+        h.el.classList.remove('tm-dragging');
+        root.classList.remove('tm-split-dragging');
+        root.style.removeProperty('cursor');
+        write();
       };
-      handle.addEventListener('pointermove', move);
-      handle.addEventListener('pointerup', up);
-      handle.addEventListener('pointercancel', up);
+      h.el.addEventListener('pointermove', move);
+      h.el.addEventListener('pointerup', up);
+      h.el.addEventListener('pointercancel', up);
     }
 
-    const run = (action) => (action === 'open' ? open() : action === 'close' ? close() : null);
+    // Divide the pane `id`. The new pane goes after it (right or below).
+    function split(id, dir) {
+      const p = pathTo(id);
+      if (!p) return;
+      const leaf = p[p.length - 1];
+      const parent = p[p.length - 2];
+      const fresh = { id: `p${state.next++}` };
+      if (parent && parent.dir === dir) {
+        const i = parent.kids.indexOf(leaf);
+        const half = parent.sizes[i] / 2;
+        parent.kids.splice(i + 1, 0, fresh);
+        parent.sizes.splice(i, 1, half, half);
+      } else {
+        const node = { dir, kids: [leaf, fresh], sizes: [0.5, 0.5] };
+        if (parent) parent.kids[parent.kids.indexOf(leaf)] = node;
+        else state.tree = node;
+      }
+      write();
+      render();
+      const rec = frames.get(fresh.id);
+      if (rec) rec.frame.focus();
+    }
+
+    // Close the pane `id`. The pane of the page ('main') cannot close.
+    function close(id) {
+      const p = pathTo(id);
+      if (!p || id === 'main' || p.length < 2) return;
+      const parent = p[p.length - 2];
+      const i = parent.kids.indexOf(p[p.length - 1]);
+      const size = parent.sizes[i];
+      parent.kids.splice(i, 1);
+      parent.sizes.splice(i, 1);
+      parent.sizes[Math.max(0, i - 1)] += size;
+      if (parent.kids.length === 1) {
+        const only = parent.kids[0];
+        const grand = p[p.length - 3];
+        if (grand) grand.kids[grand.kids.indexOf(parent)] = only;
+        else state.tree = only;
+      }
+      write();
+      render();
+      window.focus();
+    }
+
+    // Move one edge of the pane `id` in the direction of the arrow key:
+    // the right (or bottom) edge, or the left (or top) edge when the pane
+    // is at the right (or bottom) end.
+    function resize(id, dir, sign) {
+      const p = pathTo(id);
+      if (!p) return;
+      let before = null;
+      for (let k = p.length - 2; k >= 0; k--) {
+        const node = p[k];
+        if (node.dir !== dir) continue;
+        const i = node.kids.indexOf(p[k + 1]);
+        if (i < node.kids.length - 1) {
+          moveLine(node, i, sign * STEP);
+          before = null;
+          write();
+          render();
+          return;
+        }
+        if (!before && i > 0) before = { node, i: i - 1 };
+      }
+      if (!before) return;
+      moveLine(before.node, before.i, sign * STEP);
+      write();
+      render();
+    }
+
+    function run(action, id) {
+      if (action === 'splitRight') split(id, 'row');
+      else if (action === 'splitDown') split(id, 'col');
+      else if (action === 'close') close(id);
+      else if (action === 'left') resize(id, 'row', -1);
+      else if (action === 'right') resize(id, 'row', 1);
+      else if (action === 'up') resize(id, 'col', -1);
+      else if (action === 'down') resize(id, 'col', 1);
+    }
+    // A key in the top page is for the pane of the page ('main').
     window.addEventListener('keydown', (e) => {
-      const action = splitAction(e);
+      const action = paneAction(e);
       if (!action) return;
       e.preventDefault();
       e.stopPropagation();
-      run(action);
+      run(action, 'main');
     }, true);
+    // A key in a frame is for the pane of that frame.
     window.addEventListener('message', (e) => {
-      if (e.origin !== location.origin || !e.data || !e.data.tmSplit) return;
-      if (!frame || e.source !== frame.contentWindow) return;
-      run(e.data.tmSplit);
+      if (e.origin !== location.origin || !e.data || !e.data.tmPane) return;
+      for (const [id, rec] of frames) {
+        if (e.source === rec.frame.contentWindow) run(String(e.data.tmPane), id);
+      }
     });
 
-    // Each second: remember the URL of the frame, and follow a change of
+    // Each second: remember the URL of each frame, and follow a change of
     // project in the top page (the app changes the URL without a reload).
     setInterval(() => {
       if (location.pathname !== path) {
         path = location.pathname;
-        if (handle) handle.remove();
-        if (pane) pane.remove();
-        handle = pane = frame = null;
+        clear();
         state = read();
-        place();
+        render();
         return;
       }
-      if (!frame) return;
-      try {
-        const url = frame.contentWindow.location.href;
-        if (url && url !== 'about:blank' && url !== state.url) {
-          state.url = url;
-          write(state);
-        }
-      } catch (e) { /* the frame is not ready */ }
+      let changed = false;
+      for (const leaf of leaves(state.tree)) {
+        const rec = frames.get(leaf.id);
+        if (!rec) continue;
+        try {
+          const url = rec.frame.contentWindow.location.href;
+          if (url && url !== 'about:blank' && url !== leaf.url) {
+            leaf.url = url;
+            changed = true;
+          }
+        } catch (e) { /* the frame is not ready */ }
+      }
+      if (changed) write();
     }, 1000);
 
     const start = () => {
       let queued = false;
+      // The page can draw its panes again: put the holder back then.
       new MutationObserver(() => {
-        if (queued || !state.open) return;
+        if (queued || isLeaf(state.tree)) return;
         queued = true;
         requestAnimationFrame(() => {
           queued = false;
-          place();
+          render();
         });
       }).observe(document.body, { childList: true, subtree: true });
-      place();
+      render();
     };
     if (document.body) start();
     else document.addEventListener('DOMContentLoaded', start);
@@ -1913,8 +2159,9 @@ code[data-epitaxy-inline-code],
       init: initThreadDrag,
     },
     {
-      // A second thread pane at the right of the page, with a divider that
-      // you can drag. See "Split panes" above and SPLIT_KEY at the top.
+      // Divide the thread area into panes (side by side, top and bottom),
+      // with lines that you can drag. See "Split panes" above and
+      // PANE_KEYS at the top.
       id: 'split-panes',
       enabled: true,
       css: SPLIT_CSS,
