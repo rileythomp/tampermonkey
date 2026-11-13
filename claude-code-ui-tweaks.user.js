@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.31
+// @version      0.32
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -61,14 +61,17 @@
   // The arrow keys move one edge of the pane in the direction of the arrow:
   // the right or bottom edge, or the left or top edge when the pane is at
   // the right or bottom end. You can also drag the lines between the panes.
+  // In a text field that has text, the arrow keys keep their usual function
+  // (Cmd+Shift+arrow selects text) and do not move an edge.
+  // Cmd+Shift+W is not possible for "close": the browser uses it.
   const PANE_KEYS = {
     splitRight: 'Mod+Backslash', // new pane at the right of this pane
     splitDown: 'Mod+Shift+Backslash', // new pane below this pane
     close: 'Ctrl+Alt+KeyW', // close this pane (not the first pane)
-    left: 'Ctrl+Alt+ArrowLeft',
-    right: 'Ctrl+Alt+ArrowRight',
-    up: 'Ctrl+Alt+ArrowUp',
-    down: 'Ctrl+Alt+ArrowDown',
+    left: 'Mod+Shift+ArrowLeft',
+    right: 'Mod+Shift+ArrowRight',
+    up: 'Mod+Shift+ArrowUp',
+    down: 'Mod+Shift+ArrowDown',
   };
 
   // ---- Shared selectors -------------------------------------------------
@@ -1428,6 +1431,14 @@ html.tm-split-dragging {
 }
 `;
 
+  // True when the element is a text field (or is in one) that has text.
+  function hasText(el) {
+    const field = el && el.closest && el.closest('input, textarea, [contenteditable]:not([contenteditable="false"])');
+    if (!field) return false;
+    const text = 'value' in field ? field.value : field.textContent;
+    return !!(text && text.trim());
+  }
+
   // Returns the name of the pane action for a keydown event, or ''.
   function paneAction(e) {
     const mac = /Mac/.test(navigator.platform);
@@ -1440,6 +1451,7 @@ html.tm-split-dragging {
       const ctrl = want('Ctrl') || (!mac && want('Mod'));
       if (e.metaKey !== meta || e.ctrlKey !== ctrl) continue;
       if (e.altKey !== want('Alt') || e.shiftKey !== want('Shift')) continue;
+      if (code.startsWith('Arrow') && hasText(e.target)) return '';
       return action;
     }
     return '';
