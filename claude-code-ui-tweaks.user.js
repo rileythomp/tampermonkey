@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.36
+// @version      0.37
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -84,6 +84,7 @@
     width: 380, // closed
     openWidth: 440,
     openHeight: 640, // never more than 75% of the window height
+    pad: 8, // space around the message field and its controls
     margin: 16, // space to the left edge and the bottom edge
   };
 
@@ -1947,6 +1948,8 @@ html.tm-split-dragging {
   // "left" is relative to the sidebar edge.
   const CHAT_SLOT = `${TILE_ROW} > .tiles-slot:has([data-project-chat-tile])`;
   const CHAT_OPEN = 'tm-chat-open';
+  // The block at the bottom of the chat that holds the message field.
+  const CHAT_DOCK = '[data-chat-rail-dock]';
 
   const FLOAT_CSS = `
 html:not(.tm-in-split) ${CHAT_SLOT} {
@@ -1955,7 +1958,7 @@ html:not(.tm-in-split) ${CHAT_SLOT} {
   bottom: ${CHAT_BOX.margin}px !important;
   top: auto !important;
   width: ${CHAT_BOX.width}px !important;
-  height: 84px !important;
+  height: var(--tm-chat-h, ${76 + 2 * CHAT_BOX.pad + 2}px) !important;
   flex: none !important;
   min-width: 0 !important;
   min-height: 0 !important;
@@ -1969,6 +1972,11 @@ html:not(.tm-in-split) ${CHAT_SLOT} {
 html.${CHAT_OPEN}:not(.tm-in-split) ${CHAT_SLOT} {
   width: ${CHAT_BOX.openWidth}px !important;
   height: min(75vh, ${CHAT_BOX.openHeight}px) !important;
+}
+/* The message field and its controls use the full width of the box. */
+html:not(.tm-in-split) ${CHAT_SLOT} ${CHAT_DOCK} {
+  padding: ${CHAT_BOX.pad}px !important;
+  max-width: none !important;
 }
 /* Closed: no top bar (the messages get no height) */
 html:not(.${CHAT_OPEN}):not(.tm-in-split) ${CHAT_SLOT} .epitaxy-titlebar {
@@ -2005,6 +2013,24 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       setTimeout(toEnd, 600);
     };
     const close = () => html.classList.remove(CHAT_OPEN);
+
+    // The closed box has the height of the message field block, which
+    // grows when the text has more lines. The page can replace the block,
+    // so look for it again at intervals.
+    let dock = null;
+    const fit = () => {
+      if (dock) html.style.setProperty('--tm-chat-h', `${Math.round(dock.offsetHeight) + 2}px`);
+    };
+    const sizes = new ResizeObserver(fit);
+    setInterval(() => {
+      const box = slot();
+      const now = box ? box.querySelector(CHAT_DOCK) : null;
+      if (now === dock) return;
+      sizes.disconnect();
+      dock = now;
+      if (dock) sizes.observe(dock);
+      fit();
+    }, 1000);
 
     // Open: Enter in the message field (with text), or a click in the
     // box. Close: Esc in the chat, or a click out of the box.
