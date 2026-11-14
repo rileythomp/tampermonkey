@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.35
+// @version      0.36
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -1937,9 +1937,9 @@ html.tm-split-dragging {
   // ---- Floating chat ----------------------------------------------------
   // The project chat ("coordinator") is a small box in the bottom-left
   // corner, above the thread area. The thread area gets the full width.
-  // Closed, the box shows only the message field. When you send a message,
-  // the box opens and shows the messages. Esc or a click out of the box
-  // closes it again. The open and closed sizes are in CHAT_BOX at the top.
+  // Closed, the box shows only the message field. A click in the box, or
+  // a message that you send, opens the box and shows the messages. Esc or
+  // a click out of the box closes it again. The open and closed sizes are in CHAT_BOX at the top.
   //
   // The script does not move the nodes of the page. It gives the chat slot
   // of the tile row a fixed position, and it hides the divider. The
@@ -2006,8 +2006,8 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     };
     const close = () => html.classList.remove(CHAT_OPEN);
 
-    // Send: Enter in the message field (with text), or a click on the
-    // send button of the chat.
+    // Open: Enter in the message field (with text), or a click in the
+    // box. Close: Esc in the chat, or a click out of the box.
     window.addEventListener('keydown', (e) => {
       if (!inChat(e.target)) return;
       if (e.key === 'Escape') {
@@ -2021,9 +2021,7 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     document.addEventListener('pointerdown', (e) => {
       const t = e.target;
       if (inChat(t)) {
-        const btn = t.closest('[data-cds="ChatComposer"] button');
-        const label = btn ? btn.getAttribute('aria-label') || '' : '';
-        if (btn && !btn.disabled && (btn.type === 'submit' || /^send$/i.test(label))) open();
+        open();
         return;
       }
       if (t.closest && t.closest(POPUP)) return;
@@ -2376,7 +2374,7 @@ code[data-epitaxy-inline-code],
     },
     {
       // The project chat is a small box in the bottom-left corner that
-      // opens when you send a message. See "Floating chat" above and
+      // opens when you click in it or send a message. See "Floating chat" above and
       // CHAT_BOX at the top.
       id: 'floating-chat',
       enabled: true,
