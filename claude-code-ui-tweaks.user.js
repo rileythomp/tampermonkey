@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.34
+// @version      0.35
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -17,6 +17,7 @@
   //   Theme values      colors and tokens for slack-theme
   //   Thread drag       CSS and code for thread-drag-sections
   //   Split panes       CSS and code for split-panes
+//   Floating chat     CSS and code for floating-chat
   //   Tweaks            the list of tweaks (id, enabled, css, init)
   //   Loader            adds the CSS and runs init() of each enabled tweak
   // Each tweak adds a <style id="tm-tweak-<id>">. Names that start with
@@ -77,6 +78,14 @@
   // panes (0.1 to 1). The active pane is the pane where you clicked or
   // typed last. 1 = no dimming. The project chat is never dimmed.
   const PANE_DIM = 0.55;
+  // Size of the floating project chat (floating-chat tweak), in pixels.
+  // Closed: only the message field shows. Open: the messages show too.
+  const CHAT_BOX = {
+    width: 380, // closed
+    openWidth: 440,
+    openHeight: 640, // never more than 75% of the window height
+    margin: 16, // space to the left edge and the bottom edge
+  };
 
   // ---- Shared selectors -------------------------------------------------
   // NOTE: do not put :has() inside :has(). CSS does not permit it, and the
@@ -158,6 +167,8 @@
     avatarMe: '#611f69',
     avatarBot: '#0d6a7b',
     avatarBotImageBg: '#f0eee6',
+    // Shadow of the floating project chat.
+    floatShadow: 'rgba(0, 0, 0, 0.35)',
   };
   // Some components read a second set of tokens (--cds-fizzy-lake-color-*)
   // and --muted-as-secondary. This function gives them the same colors.
@@ -1923,6 +1934,103 @@ html.tm-split-dragging {
     else document.addEventListener('DOMContentLoaded', start);
   }
 
+  // ---- Floating chat ----------------------------------------------------
+  // The project chat ("coordinator") is a small box in the bottom-left
+  // corner, above the thread area. The thread area gets the full width.
+  // Closed, the box shows only the message field. When you send a message,
+  // the box opens and shows the messages. Esc or a click out of the box
+  // closes it again. The open and closed sizes are in CHAT_BOX at the top.
+  //
+  // The script does not move the nodes of the page. It gives the chat slot
+  // of the tile row a fixed position, and it hides the divider. The
+  // containing block of the slot starts at the right of the sidebar, so
+  // "left" is relative to the sidebar edge.
+  const CHAT_SLOT = `${TILE_ROW} > .tiles-slot:has([data-project-chat-tile])`;
+  const CHAT_OPEN = 'tm-chat-open';
+
+  const FLOAT_CSS = `
+html:not(.tm-in-split) ${CHAT_SLOT} {
+  position: fixed !important;
+  left: ${CHAT_BOX.margin}px !important;
+  bottom: ${CHAT_BOX.margin}px !important;
+  top: auto !important;
+  width: ${CHAT_BOX.width}px !important;
+  height: 84px !important;
+  flex: none !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  z-index: 50 !important;
+  overflow: hidden !important;
+  border: 1px solid hsl(var(--border-300, 0 0% 50%) / 0.35);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px ${COLORS.floatShadow};
+  transition: width 120ms, height 120ms;
+}
+html.${CHAT_OPEN}:not(.tm-in-split) ${CHAT_SLOT} {
+  width: ${CHAT_BOX.openWidth}px !important;
+  height: min(75vh, ${CHAT_BOX.openHeight}px) !important;
+}
+/* Closed: no top bar (the messages get no height) */
+html:not(.${CHAT_OPEN}):not(.tm-in-split) ${CHAT_SLOT} .epitaxy-titlebar {
+  display: none !important;
+}
+html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
+  display: none !important;
+}
+`;
+
+  function initFloat() {
+    if (IN_SPLIT) return;
+    const html = document.documentElement;
+    const slot = () => document.querySelector(CHAT_SLOT);
+    const inChat = (el) => !!(el && el.closest && el.closest('[data-project-chat-tile]'));
+    // Menus and dialogs of the chat show out of the box (in portals).
+    const POPUP = '[role="menu"], [role="dialog"], [role="listbox"], [data-radix-popper-content-wrapper]';
+
+    // Scroll the messages to the end after the box opens.
+    const toEnd = () => {
+      const box = slot();
+      if (!box) return;
+      for (const el of box.querySelectorAll('*')) {
+        const oy = getComputedStyle(el).overflowY;
+        if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) {
+          el.scrollTop = el.scrollHeight;
+        }
+      }
+    };
+    const open = () => {
+      if (html.classList.contains(CHAT_OPEN)) return;
+      html.classList.add(CHAT_OPEN);
+      setTimeout(toEnd, 150);
+      setTimeout(toEnd, 600);
+    };
+    const close = () => html.classList.remove(CHAT_OPEN);
+
+    // Send: Enter in the message field (with text), or a click on the
+    // send button of the chat.
+    window.addEventListener('keydown', (e) => {
+      if (!inChat(e.target)) return;
+      if (e.key === 'Escape') {
+        close();
+        return;
+      }
+      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+      if (!e.target.closest('[data-cds="ChatComposer"]') || !hasText(e.target)) return;
+      open();
+    }, true);
+    document.addEventListener('pointerdown', (e) => {
+      const t = e.target;
+      if (inChat(t)) {
+        const btn = t.closest('[data-cds="ChatComposer"] button');
+        const label = btn ? btn.getAttribute('aria-label') || '' : '';
+        if (btn && !btn.disabled && (btn.type === 'submit' || /^send$/i.test(label))) open();
+        return;
+      }
+      if (t.closest && t.closest(POPUP)) return;
+      close();
+    }, true);
+  }
+
   // ---- Tweaks -----------------------------------------------------------
   // To add a change: add an entry with an id, an enabled flag, and css.
   // An optional init() function is for changes that need JavaScript.
@@ -2265,6 +2373,15 @@ code[data-epitaxy-inline-code],
       enabled: true,
       css: SPLIT_CSS,
       init: initSplit,
+    },
+    {
+      // The project chat is a small box in the bottom-left corner that
+      // opens when you send a message. See "Floating chat" above and
+      // CHAT_BOX at the top.
+      id: 'floating-chat',
+      enabled: true,
+      css: FLOAT_CSS,
+      init: initFloat,
     },
     {
       // No bold text: regular weight (400) for all text, also for
