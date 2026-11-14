@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.33
+// @version      0.34
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -1354,8 +1354,9 @@
   // The page puts its panes ("tiles") in one flex row: chat slot, divider,
   // thread slot. The script works only in the thread slot, so the width of
   // the project chat does not change. It does not move the nodes of the
-  // page: it gives the page's pane a position in the slot, and it adds the
-  // frames and the divider lines in one holder at the end of the slot.
+  // page: it gives the page's pane a position in the slot, and it puts the
+  // frames and the divider lines in one holder (a child of <body>) that
+  // stays on the rectangle of the slot.
   //
   // The layout is a tree, saved in localStorage for each project:
   //   leaf:  {id: 'main'} or {id: 'p3', url}
@@ -1390,10 +1391,9 @@ html.tm-in-split ${TILE_ROW} > [data-tile-divider] {
   height: var(--tm-main-h) !important;
 }
 .tm-panes {
-  position: absolute;
-  inset: 0;
+  position: fixed;
   pointer-events: none;
-  z-index: 3;
+  z-index: 5;
 }
 .tm-pane {
   position: absolute;
@@ -1581,7 +1581,8 @@ html.tm-split-dragging {
 
     let state = read();
     let path = location.pathname;
-    let holder = null;
+    let holder = null; // holds the frames and the lines; a child of <body>
+    let host = null; // the thread slot of the page
     const frames = new Map(); // leaf id -> {pane, frame}
     let handles = [];
     let active = 'main'; // id of the active pane
@@ -1593,7 +1594,6 @@ html.tm-split-dragging {
     // Dim the panes that are not active.
     function showActive() {
       if (!pathTo(active)) active = 'main';
-      const host = holder && holder.parentElement;
       if (host) host.classList.toggle('tm-main-dim', active !== 'main');
       for (const [id, rec] of frames) rec.pane.classList.toggle('tm-dim', id !== active);
     }
@@ -1603,6 +1603,22 @@ html.tm-split-dragging {
       showActive();
     }
 
+    // Put the holder on the rectangle of the thread slot.
+    function place() {
+      if (!holder) return;
+      const ok = host && host.isConnected;
+      const box = ok && host.getBoundingClientRect();
+      const show = ok && box.width > 0 && box.height > 0;
+      setIf(holder, 'display', show ? '' : 'none');
+      if (!show) return;
+      setIf(holder, 'left', `${box.left}px`);
+      setIf(holder, 'top', `${box.top}px`);
+      setIf(holder, 'width', `${box.width}px`);
+      setIf(holder, 'height', `${box.height}px`);
+    }
+    const watch = new ResizeObserver(place);
+    window.addEventListener('resize', place);
+
     function clear() {
       document.querySelectorAll('.tm-panes-host').forEach((el) => {
         el.classList.remove('tm-panes-host', 'tm-main-dim');
@@ -1610,6 +1626,8 @@ html.tm-split-dragging {
       });
       if (holder) holder.remove();
       holder = null;
+      host = null;
+      watch.disconnect();
       frames.clear();
       handles = [];
     }
@@ -1618,19 +1636,33 @@ html.tm-split-dragging {
       const row = document.querySelector(TILE_ROW);
       // The thread slot: the last slot of the row that holds panes.
       const slot = row && [...row.children].filter((el) => el.querySelector(':scope > .tiles-shell')).pop();
-      if (isLeaf(state.tree) || !slot || slot.querySelector('[data-project-chat-tile]')) {
-        if (isLeaf(state.tree)) clear();
+      if (isLeaf(state.tree)) {
+        clear();
         return;
       }
+      if (!slot || slot.querySelector('[data-project-chat-tile]')) {
+        // No thread slot at this time: hide the panes, but keep the frames.
+        host = null;
+        place();
+        return;
+      }
+      // The holder is a child of <body>, not of the slot. The page draws
+      // the slot again when you open or close a thread, and a frame loads
+      // again each time it leaves the document.
       if (!holder) {
         holder = document.createElement('div');
         holder.className = 'tm-panes';
       }
-      if (holder.parentElement !== slot) {
-        document.querySelectorAll('.tm-panes-host').forEach((el) => el !== slot && el.classList.remove('tm-panes-host'));
-        slot.appendChild(holder);
+      if (holder.parentElement !== document.body) document.body.appendChild(holder);
+      if (host !== slot) {
+        document.querySelectorAll('.tm-panes-host').forEach((el) => el !== slot && el.classList.remove('tm-panes-host', 'tm-main-dim'));
+        host = slot;
+        watch.disconnect();
+        watch.observe(slot);
+        watch.observe(row);
       }
       slot.classList.add('tm-panes-host');
+      place();
       const { panes, lines } = layout(state.tree, { x: 0, y: 0, w: 1, h: 1 }, { panes: [], lines: [] });
       const seen = new Set();
       for (const { leaf, r } of panes) {
@@ -1858,6 +1890,7 @@ html.tm-split-dragging {
         render();
         return;
       }
+      place();
       let changed = false;
       for (const leaf of leaves(state.tree)) {
         const rec = frames.get(leaf.id);
