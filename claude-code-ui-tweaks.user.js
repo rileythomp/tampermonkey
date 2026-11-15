@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.46
+// @version      0.47
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -2794,6 +2794,12 @@ ${PILL_ROW} [data-testid="thread-page-pill"] button {
   height: 24px;
   padding-block: 0 !important;
   box-shadow: none !important;
+}
+/* The message list keeps an empty block (60px) at its end, as space for
+   the chip above the chat box. The chip is not there now, so make the
+   block small: the last message then shows near the chat box. */
+[data-rocksteady-sizer] > div:last-child[style*="height"] {
+  height: 20px !important;
 }
 `,
     },
