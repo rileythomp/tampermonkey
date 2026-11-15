@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.41
+// @version      0.42
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -1494,7 +1494,10 @@ html.tm-split-dragging {
         window.top.postMessage({ tmPane: action }, location.origin);
       }, true);
       // Tell the top page when this pane becomes the active pane.
-      const active = () => window.top.postMessage({ tmPane: 'focus' }, location.origin);
+      const active = (e) => {
+        const down = !!e && e.type === 'pointerdown';
+        window.top.postMessage({ tmPane: 'focus', down }, location.origin);
+      };
       window.addEventListener('pointerdown', active, true);
       window.addEventListener('focus', active);
       // The X button of the pane closes the pane. Without this, it goes
@@ -1939,8 +1942,9 @@ html.tm-split-dragging {
   // The project chat ("coordinator") is a small box in the bottom-left
   // corner, above the thread area. The thread area gets the full width.
   // Closed, the box shows only the message field. A click in the box, or
-  // a message that you send, opens the box and shows the messages. Esc or
-  // a click out of the box closes it again. Drag the box to move it: start
+  // a message that you send, opens the box and shows the messages. The X
+  // at the top right of the open box, Esc, or a click out of the box closes
+  // it again. Drag the box to move it: start
   // on a part that is not a field, a button, a link or text. The position
   // is saved (localStorage key "tm-chat-pos"; remove the key to put the box
   // back in the corner). The sizes are in CHAT_BOX at the top.
@@ -2026,6 +2030,27 @@ html.tm-chat-dragging iframe {
 html:not(.tm-in-split) ${CHAT_SLOT} ${CHAT_DOCK} {
   padding: ${CHAT_BOX.pad}px !important;
   max-width: none !important;
+}
+/* Open: an X at the right of the top bar closes the box. It is a part of
+   the slot (not a node of the page), so the script finds a click on it
+   from the pointer position (CLOSE_ZONE). */
+html.${CHAT_OPEN}:not(.tm-in-split) ${CHAT_SLOT} .epitaxy-titlebar [data-cds="Toolbar"] {
+  padding-right: 36px !important;
+}
+html.${CHAT_OPEN}:not(.tm-in-split) ${CHAT_SLOT}::after {
+  content: '\\00d7';
+  position: absolute;
+  top: 8px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  line-height: 1;
+  z-index: 3;
+  cursor: pointer;
+  opacity: 0.75;
 }
 /* Closed: no top bar (the messages get no height) */
 html:not(.${CHAT_OPEN}):not(.tm-in-split) ${CHAT_SLOT} .epitaxy-titlebar {
@@ -2240,10 +2265,21 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     // The pointer must move this distance (pixels) before a drag starts,
     // so that a click stays a click.
     const DRAG_START = 4;
+    // True when the pointer is on the X of the open box (see the CSS).
+    const onClose = (e, box) => {
+      if (e.target !== box || !html.classList.contains(CHAT_OPEN)) return false;
+      const r = box.getBoundingClientRect();
+      return e.clientX >= r.right - 36 && e.clientY <= r.top + 38;
+    };
     let drag = null;
     document.addEventListener('pointerdown', (e) => {
       const t = e.target;
       const box = slot();
+      if (box && e.button === 0 && onClose(e, box)) {
+        e.preventDefault();
+        close();
+        return;
+      }
       if (box && box.contains(t)) {
         if (e.button === 0 && !t.closest(FIELD) && !onScrollBar(e) && !onText(e)) {
           // A possible drag. If the pointer does not move, it is a click:
@@ -2294,6 +2330,11 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     };
     window.addEventListener('pointerup', endDrag, true);
     window.addEventListener('pointercancel', endDrag, true);
+    // A click in a pane frame (split-panes) is a click out of the box,
+    // but the event does not come to this page. The frame sends a message.
+    window.addEventListener('message', (e) => {
+      if (e.origin === location.origin && e.data && e.data.tmPane === 'focus' && e.data.down) close();
+    });
   }
 
   // ---- Tweaks -----------------------------------------------------------
