@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.42
+// @version      0.43
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -2058,6 +2058,13 @@ html:not(.${CHAT_OPEN}):not(.tm-in-split) ${CHAT_SLOT} .epitaxy-titlebar {
 }
 html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
   display: none !important;
+}
+/* The thread slot gets the full width of the row. The page gives the two
+   slots flex-grow values with a sum of 2 (for example 1.2 and 0.8). The
+   chat slot is not in the row now, and a flex-grow below 1 fills only
+   that fraction of the row. This rule is for the pane frames too. */
+${TILE_ROW} > .tiles-slot:not(:has([data-project-chat-tile])) {
+  flex-grow: 1 !important;
 }
 `;
 
