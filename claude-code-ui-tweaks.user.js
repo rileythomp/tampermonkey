@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.37
+// @version      0.38
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -85,7 +85,8 @@
     openWidth: 440,
     openHeight: 640, // never more than 75% of the window height
     pad: 8, // space around the message field and its controls
-    margin: 16, // space to the left edge and the bottom edge
+    margin: 16, // space to the left edge and the bottom edge (start position)
+    grip: 12, // height of the strip at the top that you drag to move the box
   };
 
   // ---- Shared selectors -------------------------------------------------
@@ -1940,7 +1941,10 @@ html.tm-split-dragging {
   // corner, above the thread area. The thread area gets the full width.
   // Closed, the box shows only the message field. A click in the box, or
   // a message that you send, opens the box and shows the messages. Esc or
-  // a click out of the box closes it again. The open and closed sizes are in CHAT_BOX at the top.
+  // a click out of the box closes it again. Drag the strip at the top of
+  // the box to move the box. The position is saved (localStorage key
+  // "tm-chat-pos"). A double-click on the strip puts the box back in the
+  // corner. The sizes are in CHAT_BOX at the top.
   //
   // The script does not move the nodes of the page. It gives the chat slot
   // of the tile row a fixed position, and it hides the divider. The
@@ -1954,11 +1958,12 @@ html.tm-split-dragging {
   const FLOAT_CSS = `
 html:not(.tm-in-split) ${CHAT_SLOT} {
   position: fixed !important;
-  left: ${CHAT_BOX.margin}px !important;
-  bottom: ${CHAT_BOX.margin}px !important;
+  left: var(--tm-chat-x, ${CHAT_BOX.margin}px) !important;
+  bottom: var(--tm-chat-b, ${CHAT_BOX.margin}px) !important;
   top: auto !important;
   width: ${CHAT_BOX.width}px !important;
-  height: var(--tm-chat-h, ${76 + 2 * CHAT_BOX.pad + 2}px) !important;
+  height: var(--tm-chat-h, ${76 + 2 * CHAT_BOX.pad + 2 + CHAT_BOX.grip}px) !important;
+  box-sizing: border-box !important;
   flex: none !important;
   min-width: 0 !important;
   min-height: 0 !important;
@@ -1972,6 +1977,48 @@ html:not(.tm-in-split) ${CHAT_SLOT} {
 html.${CHAT_OPEN}:not(.tm-in-split) ${CHAT_SLOT} {
   width: ${CHAT_BOX.openWidth}px !important;
   height: min(75vh, ${CHAT_BOX.openHeight}px) !important;
+}
+/* The chat starts below the strip at the top of the box. The messages
+   must not show on the strip (the closed box gives them no height). */
+html:not(.tm-in-split) ${CHAT_SLOT} > .tiles-shell {
+  top: ${CHAT_BOX.grip}px !important;
+  bottom: 0 !important;
+  height: auto !important;
+  overflow: hidden !important;
+}
+/* The strip at the top that moves the box, with a short line as a mark. */
+html:not(.tm-in-split) ${CHAT_SLOT}::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: ${CHAT_BOX.grip}px;
+  z-index: 2;
+  cursor: grab;
+}
+html:not(.tm-in-split) ${CHAT_SLOT}::after {
+  content: '';
+  position: absolute;
+  top: ${CHAT_BOX.grip / 2 - 1}px;
+  left: calc(50% - 16px);
+  width: 32px;
+  height: 3px;
+  border-radius: 2px;
+  background: hsl(var(--border-300, 0 0% 50%) / 0.6);
+  z-index: 3;
+  pointer-events: none;
+}
+html.tm-chat-dragging ${CHAT_SLOT} {
+  transition: none !important;
+}
+html.tm-chat-dragging ${CHAT_SLOT}::before,
+html.tm-chat-dragging {
+  cursor: grabbing !important;
+}
+html.tm-chat-dragging {
+  user-select: none !important;
+}
+html.tm-chat-dragging iframe {
+  pointer-events: none !important;
 }
 /* The message field and its controls use the full width of the box. */
 html:not(.tm-in-split) ${CHAT_SLOT} ${CHAT_DOCK} {
@@ -2006,20 +2053,66 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
         }
       }
     };
+    // Position of the box: distance of its left edge and of its bottom
+    // edge from the area at the right of the sidebar. null = the corner.
+    const POS_KEY = 'tm-chat-pos';
+    let pos = null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(POS_KEY));
+      if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.b)) pos = saved;
+    } catch (e) { /* no saved position */ }
+    const savePos = () => {
+      try {
+        if (pos) localStorage.setItem(POS_KEY, JSON.stringify(pos));
+        else localStorage.removeItem(POS_KEY);
+      } catch (e) { /* storage not available */ }
+    };
+    let closedH = 76 + 2 * CHAT_BOX.pad + 2 + CHAT_BOX.grip;
+    // Puts the box at the saved position, but fully in the window. The
+    // open box is larger, so its position can be different from the
+    // saved position while it is open.
+    const place = () => {
+      const box = slot();
+      if (!box) return;
+      const isOpen = html.classList.contains(CHAT_OPEN);
+      const w = isOpen ? CHAT_BOX.openWidth : CHAT_BOX.width;
+      const h = isOpen ? Math.min(0.75 * window.innerHeight, CHAT_BOX.openHeight) : closedH;
+      // Find the origin of "left" and "bottom" from the current values.
+      const r = box.getBoundingClientRect();
+      const cs = getComputedStyle(box);
+      const originX = r.left - parseFloat(cs.left);
+      const originB = r.bottom + parseFloat(cs.bottom);
+      if (!Number.isFinite(originX) || !Number.isFinite(originB)) return;
+      const want = pos || { x: CHAT_BOX.margin, b: CHAT_BOX.margin };
+      const x = Math.max(-originX, Math.min(want.x, window.innerWidth - originX - w));
+      const b = Math.max(originB - window.innerHeight, Math.min(want.b, originB - h));
+      html.style.setProperty('--tm-chat-x', `${Math.round(x)}px`);
+      html.style.setProperty('--tm-chat-b', `${Math.round(b)}px`);
+    };
+    window.addEventListener('resize', place);
+
     const open = () => {
       if (html.classList.contains(CHAT_OPEN)) return;
       html.classList.add(CHAT_OPEN);
+      place();
       setTimeout(toEnd, 150);
       setTimeout(toEnd, 600);
     };
-    const close = () => html.classList.remove(CHAT_OPEN);
+    const close = () => {
+      if (!html.classList.contains(CHAT_OPEN)) return;
+      html.classList.remove(CHAT_OPEN);
+      place();
+    };
 
     // The closed box has the height of the message field block, which
     // grows when the text has more lines. The page can replace the block,
     // so look for it again at intervals.
     let dock = null;
     const fit = () => {
-      if (dock) html.style.setProperty('--tm-chat-h', `${Math.round(dock.offsetHeight) + 2}px`);
+      if (!dock) return;
+      closedH = Math.round(dock.offsetHeight) + 2 + CHAT_BOX.grip;
+      html.style.setProperty('--tm-chat-h', `${closedH}px`);
+      place();
     };
     const sizes = new ResizeObserver(fit);
     setInterval(() => {
@@ -2044,14 +2137,52 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       if (!e.target.closest('[data-cds="ChatComposer"]') || !hasText(e.target)) return;
       open();
     }, true);
+    // True when the pointer is on the strip at the top of the box.
+    const onGrip = (e, box) => {
+      if (e.target !== box) return false;
+      return e.clientY - box.getBoundingClientRect().top <= CHAT_BOX.grip + 1;
+    };
+    let drag = null;
     document.addEventListener('pointerdown', (e) => {
       const t = e.target;
-      if (inChat(t)) {
-        open();
+      const box = slot();
+      if (box && e.button === 0 && onGrip(e, box)) {
+        const cs = getComputedStyle(box);
+        drag = { px: e.clientX, py: e.clientY, x: parseFloat(cs.left), b: parseFloat(cs.bottom) };
+        html.classList.add('tm-chat-dragging');
+        e.preventDefault();
+        return;
+      }
+      if (box && box.contains(t)) {
+        if (inChat(t)) open();
         return;
       }
       if (t.closest && t.closest(POPUP)) return;
       close();
+    }, true);
+    window.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      pos = { x: drag.x + e.clientX - drag.px, b: drag.b - (e.clientY - drag.py) };
+      place();
+    }, true);
+    const endDrag = () => {
+      if (!drag) return;
+      drag = null;
+      html.classList.remove('tm-chat-dragging');
+      // Save the position that shows (it is fully in the window).
+      const cs = html.style;
+      pos = { x: parseFloat(cs.getPropertyValue('--tm-chat-x')), b: parseFloat(cs.getPropertyValue('--tm-chat-b')) };
+      if (!Number.isFinite(pos.x) || !Number.isFinite(pos.b)) pos = null;
+      savePos();
+    };
+    window.addEventListener('pointerup', endDrag, true);
+    window.addEventListener('pointercancel', endDrag, true);
+    document.addEventListener('dblclick', (e) => {
+      const box = slot();
+      if (!box || !onGrip(e, box)) return;
+      pos = null;
+      savePos();
+      place();
     }, true);
   }
 
