@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.39
+// @version      0.40
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -1941,8 +1941,9 @@ html.tm-split-dragging {
   // corner, above the thread area. The thread area gets the full width.
   // Closed, the box shows only the message field. A click in the box, or
   // a message that you send, opens the box and shows the messages. Esc or
-  // a click out of the box closes it again. Drag the strip at the top of
-  // the box to move the box. The position is saved (localStorage key
+  // a click out of the box closes it again. Drag the box to move it: start
+  // on a part that is not a field, a button, a link or text (the strip at
+  // the top is always such a part). The position is saved (localStorage key
   // "tm-chat-pos"). A double-click on the strip puts the box back in the
   // corner. The sizes are in CHAT_BOX at the top.
   //
@@ -2064,7 +2065,11 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
   function initFloat() {
     if (IN_SPLIT) return;
     const html = document.documentElement;
-    const slot = () => document.querySelector(CHAT_SLOT);
+    const slot = () => {
+      const tile = document.querySelector('[data-project-chat-tile]');
+      const box = tile ? tile.closest('.tiles-slot') : null;
+      return box && box.matches(CHAT_SLOT) ? box : null;
+    };
     const inChat = (el) => !!(el && el.closest && el.closest('[data-project-chat-tile]'));
     // Menus and dialogs of the chat show out of the box (in portals).
     const POPUP = '[role="menu"], [role="dialog"], [role="listbox"], [data-radix-popper-content-wrapper]';
@@ -2191,27 +2196,36 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     };
 
     // The closed box has the height of the message field block, which
-    // grows when the text has more lines. The page can replace the block,
-    // so look for it again at intervals.
+    // grows when the text has more lines.
     let dock = null;
     const fit = () => {
       if (!dock) return;
-      closedH = Math.round(dock.offsetHeight) + 2 + CHAT_BOX.grip;
+      // A block that has no layout yet gives 0: keep the last height.
+      const h = Math.round(dock.offsetHeight);
+      if (h < 30) return;
+      closedH = h + 2 + CHAT_BOX.grip;
       html.style.setProperty('--tm-chat-h', `${closedH}px`);
       place();
     };
     const sizes = new ResizeObserver(fit);
-    setInterval(() => {
+    // The page replaces the slot and the block when you go to a different
+    // project. Find the new ones immediately (before the browser paints),
+    // so that the box keeps its position and its size.
+    const sync = () => {
       const box = slot();
-      watchBody();
+      if (!box) return;
       lift(box);
-      liftOthers();
-      const now = box ? box.querySelector(CHAT_DOCK) : null;
-      if (now === dock) return;
+      if (dock && dock.isConnected && box.contains(dock)) return;
       sizes.disconnect();
-      dock = now;
+      dock = box.querySelector(CHAT_DOCK);
       if (dock) sizes.observe(dock);
       fit();
+    };
+    new MutationObserver(sync).observe(html, { childList: true, subtree: true });
+    setInterval(() => {
+      watchBody();
+      sync();
+      liftOthers();
     }, 1000);
 
     // Open: Enter in the message field (with text), or a click in the
@@ -2231,19 +2245,53 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       if (e.target !== box) return false;
       return e.clientY - box.getBoundingClientRect().top <= CHAT_BOX.grip + 1;
     };
+    // Parts of the box that do not start a drag.
+    const FIELD = 'input, textarea, select, button, a[href], label, summary, ' +
+      '[contenteditable]:not([contenteditable="false"]), [role="button"], [role="textbox"], ' +
+      '[role="menuitem"], [role="tab"], [role="switch"], [role="checkbox"], [role="slider"]';
+    // True when the pointer is on a scroll bar of the target.
+    const onScrollBar = (e) => {
+      const t = e.target;
+      const r = t.getBoundingClientRect();
+      return e.clientX - r.left - t.clientLeft >= t.clientWidth ||
+        e.clientY - r.top - t.clientTop >= t.clientHeight;
+    };
+    // True when the pointer is on text (then a drag selects the text).
+    const onText = (e) => {
+      if (!document.caretRangeFromPoint) return false;
+      const at = document.caretRangeFromPoint(e.clientX, e.clientY);
+      if (!at || at.startContainer.nodeType !== 3) return false;
+      const all = document.createRange();
+      all.selectNodeContents(at.startContainer);
+      for (const r of all.getClientRects()) {
+        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) return true;
+      }
+      return false;
+    };
+    // The pointer must move this distance (pixels) before a drag starts,
+    // so that a click stays a click.
+    const DRAG_START = 4;
     let drag = null;
     document.addEventListener('pointerdown', (e) => {
       const t = e.target;
       const box = slot();
-      if (box && e.button === 0 && onGrip(e, box)) {
-        const r = box.getBoundingClientRect();
-        drag = { px: e.clientX, py: e.clientY, x: r.left, b: window.innerHeight - r.bottom };
-        html.classList.add('tm-chat-dragging');
-        e.preventDefault();
-        return;
-      }
       if (box && box.contains(t)) {
-        if (inChat(t)) open();
+        const grip = onGrip(e, box);
+        if (e.button === 0 && (grip || (!t.closest(FIELD) && !onScrollBar(e) && !onText(e)))) {
+          // A possible drag. If the pointer does not move, it is a click:
+          // then the box opens (but not for a click on the strip).
+          const r = box.getBoundingClientRect();
+          drag = {
+            px: e.clientX,
+            py: e.clientY,
+            x: r.left,
+            b: window.innerHeight - r.bottom,
+            moved: false,
+            click: !grip && inChat(t),
+          };
+        } else if (inChat(t)) {
+          open();
+        }
         return;
       }
       if (t.closest && t.closest(POPUP)) return;
@@ -2251,16 +2299,27 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     }, true);
     window.addEventListener('pointermove', (e) => {
       if (!drag) return;
-      drag.moved = true;
-      pos = { x: drag.x + e.clientX - drag.px, b: drag.b - (e.clientY - drag.py), v: 2 };
+      const dx = e.clientX - drag.px;
+      const dy = e.clientY - drag.py;
+      if (!drag.moved) {
+        if (Math.hypot(dx, dy) < DRAG_START) return;
+        drag.moved = true;
+        html.classList.add('tm-chat-dragging');
+        const sel = window.getSelection();
+        if (sel) sel.removeAllRanges();
+      }
+      pos = { x: drag.x + dx, b: drag.b - dy, v: 2 };
       place();
     }, true);
     const endDrag = () => {
       if (!drag) return;
-      const moved = drag.moved;
+      const { moved, click } = drag;
       drag = null;
       html.classList.remove('tm-chat-dragging');
-      if (!moved) return;
+      if (!moved) {
+        if (click) open();
+        return;
+      }
       // Save the position that shows (it is fully in the window).
       if (shown) pos = shown;
       savePos();
