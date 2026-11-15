@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.40
+// @version      0.41
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -86,7 +86,6 @@
     openHeight: 640, // never more than 75% of the window height
     pad: 8, // space around the message field and its controls
     margin: 16, // space to the left edge and the bottom edge (start position)
-    grip: 12, // height of the strip at the top that you drag to move the box
   };
 
   // ---- Shared selectors -------------------------------------------------
@@ -1942,10 +1941,9 @@ html.tm-split-dragging {
   // Closed, the box shows only the message field. A click in the box, or
   // a message that you send, opens the box and shows the messages. Esc or
   // a click out of the box closes it again. Drag the box to move it: start
-  // on a part that is not a field, a button, a link or text (the strip at
-  // the top is always such a part). The position is saved (localStorage key
-  // "tm-chat-pos"). A double-click on the strip puts the box back in the
-  // corner. The sizes are in CHAT_BOX at the top.
+  // on a part that is not a field, a button, a link or text. The position
+  // is saved (localStorage key "tm-chat-pos"; remove the key to put the box
+  // back in the corner). The sizes are in CHAT_BOX at the top.
   //
   // The script does not move the nodes of the page. It gives the chat slot
   // of the tile row a fixed position, and it hides the divider.
@@ -1969,7 +1967,7 @@ html:not(.tm-in-split) ${CHAT_SLOT} {
   bottom: var(--tm-chat-b, ${CHAT_BOX.margin}px) !important;
   top: auto !important;
   width: ${CHAT_BOX.width}px !important;
-  height: var(--tm-chat-h, ${76 + 2 * CHAT_BOX.pad + 2 + CHAT_BOX.grip}px) !important;
+  height: var(--tm-chat-h, ${76 + 2 * CHAT_BOX.pad + 2}px) !important;
   box-sizing: border-box !important;
   /* Values for the popover state (the browser gives a popover its own) */
   display: block !important;
@@ -1992,40 +1990,16 @@ html.${CHAT_OPEN}:not(.tm-in-split) ${CHAT_SLOT} {
   width: ${CHAT_BOX.openWidth}px !important;
   height: min(75vh, ${CHAT_BOX.openHeight}px) !important;
 }
-/* The chat starts below the strip at the top of the box. The messages
-   must not show on the strip (the closed box gives them no height). */
+/* The messages must not show out of the chat (the closed box gives them
+   no height). */
 html:not(.tm-in-split) ${CHAT_SLOT} > .tiles-shell {
-  top: ${CHAT_BOX.grip}px !important;
-  bottom: 0 !important;
-  height: auto !important;
   overflow: hidden !important;
-}
-/* The strip at the top that moves the box, with a short line as a mark. */
-html:not(.tm-in-split) ${CHAT_SLOT}::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: ${CHAT_BOX.grip}px;
-  z-index: 2;
-  cursor: grab;
-}
-html:not(.tm-in-split) ${CHAT_SLOT}::after {
-  content: '';
-  position: absolute;
-  top: ${CHAT_BOX.grip / 2 - 1}px;
-  left: calc(50% - 16px);
-  width: 32px;
-  height: 3px;
-  border-radius: 2px;
-  background: hsl(var(--border-300, 0 0% 50%) / 0.6);
-  z-index: 3;
-  pointer-events: none;
 }
 html.tm-chat-dragging ${CHAT_SLOT} {
   transition: none !important;
 }
-html.tm-chat-dragging ${CHAT_SLOT}::before,
-html.tm-chat-dragging {
+html.tm-chat-dragging,
+html.tm-chat-dragging * {
   cursor: grabbing !important;
 }
 html.tm-chat-dragging {
@@ -2101,7 +2075,7 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
         else localStorage.removeItem(POS_KEY);
       } catch (e) { /* storage not available */ }
     };
-    let closedH = 76 + 2 * CHAT_BOX.pad + 2 + CHAT_BOX.grip;
+    let closedH = 76 + 2 * CHAT_BOX.pad + 2;
     // The position that shows (it is fully in the window).
     let shown = null;
     // Puts the box at the saved position, but fully in the window. The
@@ -2203,7 +2177,7 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       // A block that has no layout yet gives 0: keep the last height.
       const h = Math.round(dock.offsetHeight);
       if (h < 30) return;
-      closedH = h + 2 + CHAT_BOX.grip;
+      closedH = h + 2;
       html.style.setProperty('--tm-chat-h', `${closedH}px`);
       place();
     };
@@ -2240,11 +2214,6 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       if (!e.target.closest('[data-cds="ChatComposer"]') || !hasText(e.target)) return;
       open();
     }, true);
-    // True when the pointer is on the strip at the top of the box.
-    const onGrip = (e, box) => {
-      if (e.target !== box) return false;
-      return e.clientY - box.getBoundingClientRect().top <= CHAT_BOX.grip + 1;
-    };
     // Parts of the box that do not start a drag.
     const FIELD = 'input, textarea, select, button, a[href], label, summary, ' +
       '[contenteditable]:not([contenteditable="false"]), [role="button"], [role="textbox"], ' +
@@ -2276,10 +2245,9 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       const t = e.target;
       const box = slot();
       if (box && box.contains(t)) {
-        const grip = onGrip(e, box);
-        if (e.button === 0 && (grip || (!t.closest(FIELD) && !onScrollBar(e) && !onText(e)))) {
+        if (e.button === 0 && !t.closest(FIELD) && !onScrollBar(e) && !onText(e)) {
           // A possible drag. If the pointer does not move, it is a click:
-          // then the box opens (but not for a click on the strip).
+          // then the box opens.
           const r = box.getBoundingClientRect();
           drag = {
             px: e.clientX,
@@ -2287,7 +2255,7 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
             x: r.left,
             b: window.innerHeight - r.bottom,
             moved: false,
-            click: !grip && inChat(t),
+            click: inChat(t),
           };
         } else if (inChat(t)) {
           open();
@@ -2326,13 +2294,6 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     };
     window.addEventListener('pointerup', endDrag, true);
     window.addEventListener('pointercancel', endDrag, true);
-    document.addEventListener('dblclick', (e) => {
-      const box = slot();
-      if (!box || !onGrip(e, box)) return;
-      pos = null;
-      savePos();
-      place();
-    }, true);
   }
 
   // ---- Tweaks -----------------------------------------------------------
