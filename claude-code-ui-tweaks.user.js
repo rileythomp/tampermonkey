@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.44
+// @version      0.45
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -1536,12 +1536,22 @@ html.tm-split-dragging {
         Array.isArray(n.sizes) && n.sizes.length === n.kids.length &&
         n.sizes.every((s) => s > 0) && n.kids.every(validNode);
     }
+    // Give equal sizes to a split that has a very small pane (records of
+    // versions before 0.45 can have such panes).
+    function repair(n) {
+      if (isLeaf(n)) return;
+      const total = n.sizes.reduce((a, b) => a + b, 0);
+      const least = total * Math.min(MIN, 0.5 / n.kids.length);
+      if (n.sizes.some((size) => size < least)) n.sizes = n.kids.map(() => 1 / n.kids.length);
+      n.kids.forEach(repair);
+    }
     function read() {
       let st = null;
       try {
         st = JSON.parse(localStorage.getItem(keyFor()));
       } catch (e) { /* not JSON */ }
       if (st && validNode(st.tree) && leaves(st.tree).some((l) => l.id === 'main')) {
+        repair(st.tree);
         return { tree: st.tree, next: Number(st.next) || 1 };
       }
       // Record of version 0.29: one pane at the right.
@@ -1805,10 +1815,10 @@ html.tm-split-dragging {
       const parent = p[p.length - 2];
       const fresh = { id: `p${state.next++}` };
       if (parent && parent.dir === dir) {
-        const i = parent.kids.indexOf(leaf);
-        const half = parent.sizes[i] / 2;
-        parent.kids.splice(i + 1, 0, fresh);
-        parent.sizes.splice(i, 1, half, half);
+        // The panes of this split get equal sizes. If the new pane took
+        // half of its neighbour each time, the panes became very small.
+        parent.kids.splice(parent.kids.indexOf(leaf) + 1, 0, fresh);
+        parent.sizes = parent.kids.map(() => 1 / parent.kids.length);
       } else {
         const node = { dir, kids: [leaf, fresh], sizes: [0.5, 0.5] };
         if (parent) parent.kids[parent.kids.indexOf(leaf)] = node;
@@ -1827,10 +1837,10 @@ html.tm-split-dragging {
       if (!p || id === 'main' || p.length < 2) return;
       const parent = p[p.length - 2];
       const i = parent.kids.indexOf(p[p.length - 1]);
-      const size = parent.sizes[i];
+      // The other panes of the split share the free space in proportion
+      // to their sizes (layout() divides each size by the sum).
       parent.kids.splice(i, 1);
       parent.sizes.splice(i, 1);
-      parent.sizes[Math.max(0, i - 1)] += size;
       if (parent.kids.length === 1) {
         const only = parent.kids[0];
         const grand = p[p.length - 3];
