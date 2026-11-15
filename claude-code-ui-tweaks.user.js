@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.38
+// @version      0.39
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -1947,9 +1947,15 @@ html.tm-split-dragging {
   // corner. The sizes are in CHAT_BOX at the top.
   //
   // The script does not move the nodes of the page. It gives the chat slot
-  // of the tile row a fixed position, and it hides the divider. The
-  // containing block of the slot starts at the right of the sidebar, so
-  // "left" is relative to the sidebar edge.
+  // of the tile row a fixed position, and it hides the divider.
+  //
+  // The page clips the thread area at the sidebar edge and paints the
+  // sidebar above it. So the script shows the slot as a popover (Popover
+  // API): the browser then paints it in the "top layer", above all of the
+  // page, and the box can be above the sidebar too. The menus and dialogs
+  // of the page are new children of <body>. The script makes them popovers
+  // also, so that they show above the box.
+  // If the browser has no Popover API, the box stays in the thread area.
   const CHAT_SLOT = `${TILE_ROW} > .tiles-slot:has([data-project-chat-tile])`;
   const CHAT_OPEN = 'tm-chat-open';
   // The block at the bottom of the chat that holds the message field.
@@ -1964,6 +1970,13 @@ html:not(.tm-in-split) ${CHAT_SLOT} {
   width: ${CHAT_BOX.width}px !important;
   height: var(--tm-chat-h, ${76 + 2 * CHAT_BOX.pad + 2 + CHAT_BOX.grip}px) !important;
   box-sizing: border-box !important;
+  /* Values for the popover state (the browser gives a popover its own) */
+  display: block !important;
+  right: auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  color: inherit !important;
+  background: var(--cds-page-bg, hsl(var(--bg-000))) !important;
   flex: none !important;
   min-width: 0 !important;
   min-height: 0 !important;
@@ -2020,6 +2033,20 @@ html.tm-chat-dragging {
 html.tm-chat-dragging iframe {
   pointer-events: none !important;
 }
+/* A menu or dialog of the page that the script shows above the box:
+   remove the popover look of the browser. ":where" gives the rule no
+   weight, so the styles of the page stay. */
+:where([data-tm-top]:popover-open) {
+  inset: unset;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  overflow: visible;
+  width: auto;
+  height: auto;
+}
 /* The message field and its controls use the full width of the box. */
 html:not(.tm-in-split) ${CHAT_SLOT} ${CHAT_DOCK} {
   padding: ${CHAT_BOX.pad}px !important;
@@ -2053,8 +2080,10 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
         }
       }
     };
-    // Position of the box: distance of its left edge and of its bottom
-    // edge from the area at the right of the sidebar. null = the corner.
+    // Position of the box: distance of its left edge from the left of
+    // the window (x) and of its bottom edge from the bottom of the window
+    // (b). null = the bottom-left corner of the thread area.
+    // Versions before 0.39 saved {x, b} relative to the thread area.
     const POS_KEY = 'tm-chat-pos';
     let pos = null;
     try {
@@ -2068,28 +2097,85 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       } catch (e) { /* storage not available */ }
     };
     let closedH = 76 + 2 * CHAT_BOX.pad + 2 + CHAT_BOX.grip;
+    // The position that shows (it is fully in the window).
+    let shown = null;
     // Puts the box at the saved position, but fully in the window. The
     // open box is larger, so its position can be different from the
     // saved position while it is open.
     const place = () => {
       const box = slot();
       if (!box) return;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
       const isOpen = html.classList.contains(CHAT_OPEN);
       const w = isOpen ? CHAT_BOX.openWidth : CHAT_BOX.width;
-      const h = isOpen ? Math.min(0.75 * window.innerHeight, CHAT_BOX.openHeight) : closedH;
-      // Find the origin of "left" and "bottom" from the current values.
+      const h = isOpen ? Math.min(0.75 * vh, CHAT_BOX.openHeight) : closedH;
+      // Find the origin of "left" and "bottom" from the current values
+      // (the window for a popover, the thread area if not).
       const r = box.getBoundingClientRect();
       const cs = getComputedStyle(box);
       const originX = r.left - parseFloat(cs.left);
       const originB = r.bottom + parseFloat(cs.bottom);
       if (!Number.isFinite(originX) || !Number.isFinite(originB)) return;
-      const want = pos || { x: CHAT_BOX.margin, b: CHAT_BOX.margin };
-      const x = Math.max(-originX, Math.min(want.x, window.innerWidth - originX - w));
-      const b = Math.max(originB - window.innerHeight, Math.min(want.b, originB - h));
-      html.style.setProperty('--tm-chat-x', `${Math.round(x)}px`);
-      html.style.setProperty('--tm-chat-b', `${Math.round(b)}px`);
+      // The thread area, for the corner position and for old positions.
+      const view = document.querySelector('[data-tiles-viewport]');
+      const area = view ? view.getBoundingClientRect() : { left: 0, bottom: vh };
+      if (pos && !pos.v) {
+        pos = { x: pos.x + area.left, b: pos.b + vh - area.bottom, v: 2 };
+        savePos();
+      }
+      const want = pos || { x: area.left + CHAT_BOX.margin, b: vh - area.bottom + CHAT_BOX.margin };
+      const x = Math.round(Math.max(0, Math.min(want.x, vw - w)));
+      const b = Math.round(Math.max(0, Math.min(want.b, vh - h)));
+      shown = { x, b, v: 2 };
+      html.style.setProperty('--tm-chat-x', `${Math.round(x - originX)}px`);
+      html.style.setProperty('--tm-chat-b', `${Math.round(b - (vh - originB))}px`);
     };
     window.addEventListener('resize', place);
+
+    // Shows the box as a popover, so that it is above the sidebar.
+    // The browser paints the popover that opened last above the others.
+    // "turn" counts the times that the box opened as a popover.
+    let turn = 0;
+    const lift = (box) => {
+      if (!box || typeof box.showPopover !== 'function') return;
+      try {
+        if (box.getAttribute('popover') !== 'manual') box.setAttribute('popover', 'manual');
+        if (!box.matches(':popover-open')) {
+          box.showPopover();
+          turn += 1;
+          place();
+        }
+      } catch (e) { /* the box stays in the thread area */ }
+    };
+    // The page puts its menus, dialogs and messages in <div> children of
+    // <body>. Show these as popovers too, after the box, or the box hides
+    // them. "lifted" holds the turn in which each one opened.
+    const lifted = new WeakMap();
+    const liftOthers = () => {
+      const box = slot();
+      if (!box || !turn || !document.body) return;
+      for (const el of document.body.children) {
+        if (el.tagName !== 'DIV' || el.contains(box) || lifted.get(el) === turn) continue;
+        if (typeof el.showPopover !== 'function') return;
+        if (el.hasAttribute('popover') && !el.hasAttribute('data-tm-top')) continue;
+        if (/^tm-/.test(el.id) || [...el.classList].some((c) => c.startsWith('tm-'))) continue;
+        if (getComputedStyle(el).display === 'none' && !el.hasAttribute('data-tm-top')) continue;
+        try {
+          el.setAttribute('data-tm-top', '');
+          el.setAttribute('popover', 'manual');
+          if (el.matches(':popover-open')) el.hidePopover();
+          el.showPopover();
+          lifted.set(el, turn);
+        } catch (e) { /* not possible for this element */ }
+      }
+    };
+    let watching = false;
+    const watchBody = () => {
+      if (watching || !document.body) return;
+      watching = true;
+      new MutationObserver(liftOthers).observe(document.body, { childList: true });
+    };
 
     const open = () => {
       if (html.classList.contains(CHAT_OPEN)) return;
@@ -2117,6 +2203,9 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     const sizes = new ResizeObserver(fit);
     setInterval(() => {
       const box = slot();
+      watchBody();
+      lift(box);
+      liftOthers();
       const now = box ? box.querySelector(CHAT_DOCK) : null;
       if (now === dock) return;
       sizes.disconnect();
@@ -2147,8 +2236,8 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
       const t = e.target;
       const box = slot();
       if (box && e.button === 0 && onGrip(e, box)) {
-        const cs = getComputedStyle(box);
-        drag = { px: e.clientX, py: e.clientY, x: parseFloat(cs.left), b: parseFloat(cs.bottom) };
+        const r = box.getBoundingClientRect();
+        drag = { px: e.clientX, py: e.clientY, x: r.left, b: window.innerHeight - r.bottom };
         html.classList.add('tm-chat-dragging');
         e.preventDefault();
         return;
@@ -2162,17 +2251,18 @@ html:not(.tm-in-split) ${TILE_ROW} > [data-tile-divider] {
     }, true);
     window.addEventListener('pointermove', (e) => {
       if (!drag) return;
-      pos = { x: drag.x + e.clientX - drag.px, b: drag.b - (e.clientY - drag.py) };
+      drag.moved = true;
+      pos = { x: drag.x + e.clientX - drag.px, b: drag.b - (e.clientY - drag.py), v: 2 };
       place();
     }, true);
     const endDrag = () => {
       if (!drag) return;
+      const moved = drag.moved;
       drag = null;
       html.classList.remove('tm-chat-dragging');
+      if (!moved) return;
       // Save the position that shows (it is fully in the window).
-      const cs = html.style;
-      pos = { x: parseFloat(cs.getPropertyValue('--tm-chat-x')), b: parseFloat(cs.getPropertyValue('--tm-chat-b')) };
-      if (!Number.isFinite(pos.x) || !Number.isFinite(pos.b)) pos = null;
+      if (shown) pos = shown;
       savePos();
     };
     window.addEventListener('pointerup', endDrag, true);
