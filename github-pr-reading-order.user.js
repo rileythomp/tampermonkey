@@ -312,7 +312,7 @@
     function visit(f, trail) {
       if (done.has(f) || trail.has(f)) return;
       trail.add(f);
-      for (const dep of [...f.deps].filter((d) => d.kind === 'source').sort(byPath)) visit(dep, trail);
+      for (const dep of [...f.deps].filter((d) => d.kind === f.kind).sort(byPath)) visit(dep, trail);
       emit(f, 0);
       for (const t of testsOf(f)) emit(t, 1);
     }
@@ -325,7 +325,9 @@
     for (const f of entries) visit(f, new Set());
     for (const f of sources.sort(byPath)) visit(f, new Set()); // import cycles
     for (const kind of KIND_ORDER.slice(1)) {
-      for (const f of files.filter((x) => x.kind === kind).sort(byPath)) emit(f, 0);
+      // In each kind also: a file comes after the files that it uses
+      // (for example a test helper before the tests).
+      for (const f of files.filter((x) => x.kind === kind).sort(byPath)) visit(f, new Set());
     }
     return order;
   }
@@ -503,7 +505,7 @@
     progress.append(el('div'));
     const list = el('ol');
     list.id = 'tm-ro-list';
-    const keys = el('div', null, `${KEY_PREVIOUS} previous   ${KEY_NEXT} next   alt+click: mark as read`);
+    const keys = el('div', null, `${KEY_PREVIOUS} previous \u00b7 ${KEY_NEXT} next \u00b7 alt+click: mark as read`);
     keys.id = 'tm-ro-keys';
     root.append(head, progress, list, keys);
 
