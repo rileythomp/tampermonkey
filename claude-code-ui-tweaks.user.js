@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.43
+// @version      0.44
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -78,6 +78,10 @@
   // panes (0.1 to 1). The active pane is the pane where you clicked or
   // typed last. 1 = no dimming. The project chat is never dimmed.
   const PANE_DIM = 0.55;
+  // Key that hides the floating project chat fully, and shows it again
+  // (floating-chat tweak). Same format as PANE_KEYS. When the box shows
+  // again, the cursor goes to its message field.
+  const CHAT_KEY = 'Mod+Shift+KeyK';
   // Size of the floating project chat (floating-chat tweak), in pixels.
   // Closed: only the message field shows. Open: the messages show too.
   const CHAT_BOX = {
@@ -1464,19 +1468,24 @@ html.tm-split-dragging {
     return !!(text && text.trim());
   }
 
+  // True when a keydown event is the key (format: see PANE_KEYS).
+  function isKey(e, key) {
+    const mac = /Mac/.test(navigator.platform);
+    const parts = key.split('+');
+    const code = parts.pop();
+    if (e.code !== code) return false;
+    const want = (name) => parts.includes(name);
+    const meta = mac && want('Mod');
+    const ctrl = want('Ctrl') || (!mac && want('Mod'));
+    if (e.metaKey !== meta || e.ctrlKey !== ctrl) return false;
+    return e.altKey === want('Alt') && e.shiftKey === want('Shift');
+  }
+
   // Returns the name of the pane action for a keydown event, or ''.
   function paneAction(e) {
-    const mac = /Mac/.test(navigator.platform);
     for (const [action, key] of Object.entries(PANE_KEYS)) {
-      const parts = key.split('+');
-      const code = parts.pop();
-      if (e.code !== code) continue;
-      const want = (name) => parts.includes(name);
-      const meta = mac && want('Mod');
-      const ctrl = want('Ctrl') || (!mac && want('Mod'));
-      if (e.metaKey !== meta || e.ctrlKey !== ctrl) continue;
-      if (e.altKey !== want('Alt') || e.shiftKey !== want('Shift')) continue;
-      if (code.startsWith('Arrow') && hasText(e.target)) return '';
+      if (!isKey(e, key)) continue;
+      if (key.split('+').pop().startsWith('Arrow') && hasText(e.target)) return '';
       return action;
     }
     return '';
@@ -1948,6 +1957,8 @@ html.tm-split-dragging {
   // on a part that is not a field, a button, a link or text. The position
   // is saved (localStorage key "tm-chat-pos"; remove the key to put the box
   // back in the corner). The sizes are in CHAT_BOX at the top.
+  // The key CHAT_KEY (at the top) hides the box fully and shows it again.
+  // The state is saved (localStorage key "tm-chat-hidden").
   //
   // The script does not move the nodes of the page. It gives the chat slot
   // of the tile row a fixed position, and it hides the divider.
@@ -2026,6 +2037,10 @@ html.tm-chat-dragging iframe {
   width: auto;
   height: auto;
 }
+/* Hidden with CHAT_KEY */
+html.tm-chat-hidden:not(.tm-in-split) ${CHAT_SLOT} {
+  display: none !important;
+}
 /* The message field and its controls use the full width of the box. */
 html:not(.tm-in-split) ${CHAT_SLOT} ${CHAT_DOCK} {
   padding: ${CHAT_BOX.pad}px !important;
@@ -2069,7 +2084,16 @@ ${TILE_ROW} > .tiles-slot:not(:has([data-project-chat-tile])) {
 `;
 
   function initFloat() {
-    if (IN_SPLIT) return;
+    if (IN_SPLIT) {
+      // Frame: send the key to the top page.
+      window.addEventListener('keydown', (e) => {
+        if (!isKey(e, CHAT_KEY)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        window.top.postMessage({ tmChat: 'toggle' }, location.origin);
+      }, true);
+      return;
+    }
     const html = document.documentElement;
     const slot = () => {
       const tile = document.querySelector('[data-project-chat-tile]');
@@ -2115,7 +2139,7 @@ ${TILE_ROW} > .tiles-slot:not(:has([data-project-chat-tile])) {
     // saved position while it is open.
     const place = () => {
       const box = slot();
-      if (!box) return;
+      if (!box || html.classList.contains('tm-chat-hidden')) return;
       const vw = window.innerWidth;
       const vh = window.innerHeight;
       const isOpen = html.classList.contains(CHAT_OPEN);
@@ -2337,6 +2361,37 @@ ${TILE_ROW} > .tiles-slot:not(:has([data-project-chat-tile])) {
     };
     window.addEventListener('pointerup', endDrag, true);
     window.addEventListener('pointercancel', endDrag, true);
+    // CHAT_KEY hides the box fully, or shows it again.
+    const HIDDEN_KEY = 'tm-chat-hidden';
+    const setHidden = (hidden) => {
+      html.classList.toggle('tm-chat-hidden', hidden);
+      try {
+        if (hidden) localStorage.setItem(HIDDEN_KEY, '1');
+        else localStorage.removeItem(HIDDEN_KEY);
+      } catch (e) { /* storage not available */ }
+      const box = slot();
+      if (hidden) {
+        close();
+        if (box && box.contains(document.activeElement)) document.activeElement.blur();
+        return;
+      }
+      place();
+      const field = box && box.querySelector('[data-cds="ChatComposer"] [contenteditable="true"], [data-cds="ChatComposer"] textarea');
+      if (field) field.focus();
+    };
+    const toggleHidden = () => setHidden(!html.classList.contains('tm-chat-hidden'));
+    try {
+      if (localStorage.getItem(HIDDEN_KEY)) html.classList.add('tm-chat-hidden');
+    } catch (e) { /* storage not available */ }
+    window.addEventListener('keydown', (e) => {
+      if (!isKey(e, CHAT_KEY)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggleHidden();
+    }, true);
+    window.addEventListener('message', (e) => {
+      if (e.origin === location.origin && e.data && e.data.tmChat === 'toggle') toggleHidden();
+    });
     // A click in a pane frame (split-panes) is a click out of the box,
     // but the event does not come to this page. The frame sends a message.
     window.addEventListener('message', (e) => {
