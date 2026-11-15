@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.45
+// @version      0.46
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -2409,6 +2409,10 @@ ${TILE_ROW} > .tiles-slot:not(:has([data-project-chat-tile])) {
     });
   }
 
+  // The row above the chat box of a thread. It holds the artifacts chip and
+  // the "scroll to bottom" button (artifact-chip-below tweak).
+  const PILL_ROW = '[data-chat-rail-dock] > [data-testid="thread-page-pill-row"]';
+
   // ---- Tweaks -----------------------------------------------------------
   // To add a change: add an entry with an id, an enabled flag, and css.
   // An optional init() function is for changes that need JavaScript.
@@ -2760,6 +2764,38 @@ code[data-epitaxy-inline-code],
       enabled: true,
       css: FLOAT_CSS,
       init: initFloat,
+    },
+    {
+      // The artifacts chip of a thread ("3 artifacts", or the name of the
+      // newest artifact) shows above the chat box. This tweak puts it in
+      // the row below the chat box, between the microphone and the model
+      // name. The "scroll to bottom" button stays above the chat box.
+      // CSS only: the row of the chip becomes as tall as the dock of the
+      // chat box, and the chip goes to the bottom of that row.
+      id: 'artifact-chip-below',
+      enabled: true,
+      css: `
+${PILL_ROW} {
+  top: -48px !important;
+  bottom: 0 !important;
+  margin-bottom: 0 !important;
+  align-items: flex-start !important;
+  z-index: 1;
+}
+${PILL_ROW} [data-testid="thread-page-pill"] {
+  position: absolute !important;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  /* Keep clear of the buttons at the left and the model name at the right */
+  max-width: calc(100% - 300px);
+}
+${PILL_ROW} [data-testid="thread-page-pill"] button {
+  height: 24px;
+  padding-block: 0 !important;
+  box-shadow: none !important;
+}
+`,
     },
     {
       // No bold text: regular weight (400) for all text, also for
