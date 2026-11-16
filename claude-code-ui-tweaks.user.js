@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Code project – UI tweaks
 // @namespace    riley.claude.tweaks
-// @version      0.47
+// @version      0.48
 // @description  Personal UI changes for the Claude Code project page
 // @match        https://claude.ai/code/*
 // @run-at       document-start
@@ -587,6 +587,13 @@
   // - In a section with moves, the script clicks "Show more" of the page
   //   and applies its own limit (THREAD_PAGE) and its own "Show more".
   // - All output is made again by render() after each change of the page.
+  //
+  // Order in a section: drop a card on a different card to put it before
+  // or after that card (a line shows the position). The order is also only
+  // in this browser. The script shows it with the CSS "order" property.
+  // In a section that has moved threads and its own threads, the script
+  // makes the wrappers of the cards "display: contents" ("flat"), so that
+  // the copies and the cards of the page are items of one grid and can mix.
   const THREAD_DRAG_CSS = `
 .tm-dnd-head {
   grid-column: 1 / -1;
@@ -603,6 +610,10 @@
 }
 .tm-dnd-in [data-tm-card] {
   cursor: pointer;
+}
+/* Flat section: the copies are items of the grid of the page. */
+.tm-dnd-in.tm-flat {
+  display: contents;
 }
 [data-tm-card]:hover {
   background: var(--cds-bg-neutral);
@@ -699,8 +710,11 @@
     //           Versions before 0.14 kept only { thread id: label }.
     //   folded: labels of the collapsed headers that the script added
     //   ui:     { dropClass, labels }, see dropClass and seenLabels below
+    //   order:  { project id: { section label: [thread id, ...] } }
+    //           the order of the threads in a section, set by a drop
     const KEYS = {
       moves: 'tm-thread-sections',
+      order: 'tm-thread-order',
       folded: 'tm-thread-sections-folded',
       ui: 'tm-thread-sections-ui',
     };
@@ -716,6 +730,11 @@
       menuOpen: '[data-home-card] [aria-expanded="true"]',
     };
     const RESET = '\u0000reset'; // drop target "Real section (reset)"
+    // Margin of a card in a flat section (see the top). The box of the
+    // cards has a row gap of 2px; a flat section does not have the box, and
+    // the grid has a row gap of 4px, so this margin gives the same space.
+    const FLAT_MARGIN = '-1px';
+    const FLAT_CARD = `margin-block:${FLAT_MARGIN}`;
     const SAFE = /^[\w-]+$/; // ids and keys that are safe in a CSS selector
 
     // ---- Storage ----
@@ -760,6 +779,19 @@
     // does not show an empty section, but it must stay a drop target.
     const seenLabels = new Set(Array.isArray(ui.labels) ? ui.labels : []);
     const saveUi = () => store(KEYS.ui, { dropClass, labels: [...seenLabels] });
+    let orders = parse(localStorage.getItem(KEYS.order));
+    // The saved order of a section of this project (a list of thread ids).
+    const orderOf = (p, label) => {
+      const list = (orders[p] || {})[label];
+      return Array.isArray(list) ? list.filter((id) => typeof id === 'string' && SAFE.test(id)) : [];
+    };
+    const setOrderOf = (p, label, ids) => {
+      orders[p] = { ...(orders[p] || {}), [label]: ids };
+      store(KEYS.order, orders);
+    };
+    // label -> [thread id, ...]: the threads of each open section in the
+    // order of the last render (also the ones below "Show more").
+    let lastSeqs = new Map();
     let drag = null; // { id, home, html } during a drag
     let queued = false; // a render is scheduled
     let pinnedAt = 0; // time of the last openMenu()
@@ -773,12 +805,14 @@
     // Other elements:
     //   #tm-dnd-rules generated CSS (hide cards, order, counts)
     //   #tm-dnd-pin   temporary CSS while the menu of a moved card is open
+    //   #tm-dnd-mark  the line that shows where a dragged card goes
     //   .tm-dnd-bar   drop targets, shown during a drag
     //   .tm-dnd-ghost drag picture for a copy
     const make = (tag, className, props) =>
       Object.assign(document.createElement(tag), { className }, props);
     const rules = make('style', '', { id: 'tm-dnd-rules' });
     const pin = make('style', '', { id: 'tm-dnd-pin' });
+    const mark = make('style', '', { id: 'tm-dnd-mark' }); // the drop line
     const bar = make('div', 'tm-dnd-bar');
     // Write a property only when the value is different, so that the
     // MutationObserver (see start) does not loop.
@@ -925,10 +959,14 @@
     //   recs:    the moves of this project, [[id, rec]]
     //   movedIn: label -> [[id, rec]]
     //   heads:   label -> { text, order }    headers of the script
-    //   holders: label -> { order, cap }     card holders (cap: most copies)
+    //   holders: label -> { order, flat, items }   card holders
+    //            items: the copies to show, [{ id, rec, order }]
     //   mores:   label -> { order }          "Show more" of the script
+    //   seqs:    label -> [thread id, ...]   the threads of a section in order
     // "order" is the CSS order in the grid. Each section gets a block of
     // 1000: header +0, moved threads +1, cards of the page +2, "Show more" +3.
+    // A flat section (see the top) uses: header +0, each thread +10 and up,
+    // other parts of the page +900, "Show more" +950.
     function plan(grid, p, present) {
       const real = realSections(grid);
       // The moves of this project. They do not depend on which cards are
@@ -970,20 +1008,63 @@
       const heads = new Map();
       const holders = new Map();
       const mores = new Map();
-      const result = { css: '', recs, movedIn, heads, holders, mores };
-      if (!recs.length && !pending) return result;
+      const seqs = new Map();
+      const result = { css: '', recs, movedIn, heads, holders, mores, seqs };
+      const anyOrder = Object.keys(orders[p] || {}).some((l) => orderOf(p, l).length);
+      if (!recs.length && !pending && !anyOrder) return result;
 
       const hide = (id) => out.push(`[data-home-card="${id}"]{display:none !important}`);
       for (const [id] of recs) hide(id);
-      const addHolder = (label, b) => holders.set(label, { order: b + 1, cap: Infinity });
-      // "Show more": a section shows THREAD_PAGE threads (the moved
-      // threads first). The button shows all of them.
-      // own: the cards of the page in the section that are not moved away.
-      const limit = (label, ins, own, b) => {
-        if (ins + own.length <= THREAD_PAGE || showAll.has(label)) return;
-        own.slice(Math.max(0, THREAD_PAGE - ins)).forEach((c) => hide(c.dataset.homeCard));
-        if (holders.has(label)) holders.get(label).cap = THREAD_PAGE;
-        mores.set(label, { order: b + 3 });
+      // Put the threads of a section in the saved order. A thread that is
+      // not in the saved order goes after the thread that comes before it
+      // in the usual order (a new thread at the top stays at the top).
+      const sorted = (label, items) => {
+        const list = orderOf(p, label);
+        if (!list.length) return items;
+        const byId = new Map(items.map((it) => [it.id, it]));
+        const result = list.filter((id) => byId.has(id)).map((id) => byId.get(id));
+        const placed = new Set(result);
+        items.forEach((it, i) => {
+          if (placed.has(it)) return;
+          let at = 0;
+          for (let j = i - 1; j >= 0 && !at; j--) at = result.indexOf(items[j]) + 1;
+          result.splice(at, 0, it);
+          placed.add(it);
+        });
+        return result;
+      };
+      const copiesOf = (label) => (movedIn.get(label) || []).map(([id, rec]) => ({ id, rec }));
+      const addHolder = (label, b, flat) => {
+        const items = sorted(label, copiesOf(label));
+        items.forEach((it, i) => {
+          it.order = flat ? b + 10 + Math.min(i, 880) : i;
+        });
+        holders.set(label, { order: b + 1, flat, items });
+      };
+      // The threads of a section: the moved threads and "own" (the cards of
+      // the page in the section that are not moved away), in order.
+      // "Show more": a section shows THREAD_PAGE threads. The button shows
+      // all of them.
+      const arrange = (label, own, b, flat) => {
+        const items = sorted(label, [
+          ...copiesOf(label),
+          ...own.map((c) => ({ id: c.dataset.homeCard })),
+        ]);
+        seqs.set(label, items.map((it) => it.id));
+        const all = items.length <= THREAD_PAGE || showAll.has(label);
+        const shown = all ? items : items.slice(0, THREAD_PAGE);
+        for (const it of items.slice(shown.length)) if (!it.rec) hide(it.id);
+        if (!all) mores.set(label, { order: b + (flat ? 950 : 3) });
+        const custom = orderOf(p, label).length > 0;
+        shown.forEach((it, i) => {
+          it.order = flat ? b + 10 + Math.min(i, 880) : i;
+          // :not(#tm-x) makes the rule stronger than the rule for all the
+          // cards of a flat section.
+          if (!it.rec && (flat || custom)) {
+            out.push(`[data-home-card="${it.id}"]:not(#tm-x){order:${it.order}}`);
+          }
+        });
+        if (holders.has(label)) holders.get(label).items = shown.filter((it) => it.rec);
       };
 
       // Sections of the page.
@@ -1004,20 +1085,26 @@
         const open = !sec.querySelector(SEL.folded);
         if (!open) showAll.delete(label);
         const oneGroup = sec.querySelectorAll('[data-home-group]').length === 1;
-        if (ins && open && oneGroup) {
-          // Put the card holder between the header and the cards: make
-          // the wrappers of the section "display: contents", then the
-          // parts of the section are items of the grid and "order" works.
+        const flat = !!ins && open && oneGroup;
+        if (flat) {
+          // Flat section: make the wrappers of the section and of its
+          // cards "display: contents". Then the header, each card and each
+          // copy are items of the grid, and "order" puts them in sequence.
+          // The margin gives the cards the size that they had in their box.
+          const box = `${S} [data-home-group] > div:not(:first-child)`;
           out.push(
-            `${S},${S} [data-home-sort],${S} [data-home-group]{display:contents !important}`,
-            `${S} > *,${S} [data-home-sort] > *,${S} [data-home-group] > *{order:${b + 2}}`,
+            `${S},${S} [data-home-sort],${S} [data-home-group],${box},${S} ${SEL.drop}` +
+              '{display:contents !important}',
+            `${S} > *,${S} [data-home-sort] > *,${S} [data-home-group] > *,${box} > *` +
+              `{order:${b + 900}}`,
             `${S} [data-home-group] > div:first-child{order:${b}}`,
+            `${S} ${SEL.card}{${FLAT_CARD};order:${b + 899}}`,
           );
         } else {
           out.push(`${S}{order:${b}}`);
         }
-        if (ins && open) addHolder(label, b);
-        if (open && (ins || outs || pending)) {
+        if (ins && open) addHolder(label, b, flat);
+        if (open && (ins || outs || pending || orderOf(p, label).length)) {
           // The page shows only some cards and a "Show more" button.
           // Click that button, so that all the cards are on the page.
           // Then the script applies the limit to the moved threads and
@@ -1032,7 +1119,7 @@
             const own = [...sec.querySelectorAll(SEL.card)].filter(
               (c) => !(moved[c.dataset.homeCard] && present.has(c.dataset.homeCard)),
             );
-            limit(label, ins, own, b);
+            arrange(label, own, b, flat);
           }
         }
         // Correct the count in the header ("Working · 1"). The page owns
@@ -1062,8 +1149,8 @@
           showAll.delete(label);
           continue;
         }
-        addHolder(label, b);
-        limit(label, n, [], b);
+        addHolder(label, b, false);
+        arrange(label, [], b, false);
       }
       result.css = out.join('\n');
       return result;
@@ -1118,8 +1205,8 @@
       );
     }
 
-    function renderHolders(grid, holders, movedIn, present) {
-      const className = `${dropClass || 'grid grid-cols-subgrid *:col-span-full'} tm-dnd-in`;
+    function renderHolders(grid, holders, present) {
+      const base = `${dropClass || 'grid grid-cols-subgrid *:col-span-full'} tm-dnd-in`;
       syncChildren(
         grid,
         'tm-dnd-in',
@@ -1129,27 +1216,34 @@
           el.addEventListener('click', onCopyClick);
           return el;
         },
-        (el, { order, cap }) => {
-          setIf(el, 'className', className);
+        (el, { order, flat, items }) => {
+          setIf(el, 'className', flat ? `${base} tm-flat` : base);
           setOrder(el, order);
           // sig: a copy is made again when the card or "stale" changes.
-          const want = movedIn
-            .get(el.dataset.label)
-            .slice(0, cap)
-            .map(([id, rec]) => ({ id, rec, sig: (present.has(id) ? '1' : '0') + rec.html }));
+          const want = items.map((it) => ({
+            ...it,
+            sig: (present.has(it.id) ? '1' : '0') + it.rec.html,
+          }));
           const have = [...el.children];
           const same =
             have.length === want.length &&
             want.every((w, i) => have[i].dataset.tmCard === w.id && have[i].tmSig === w.sig);
-          if (same) return;
-          const copies = [];
-          for (const w of want) {
-            const c = makeCopy(w.id, w.rec.html, !present.has(w.id));
-            if (!c) continue;
-            c.tmSig = w.sig;
-            copies.push(c);
+          if (!same) {
+            const copies = [];
+            for (const w of want) {
+              const c = makeCopy(w.id, w.rec.html, !present.has(w.id));
+              if (!c) continue;
+              c.tmSig = w.sig;
+              copies.push(c);
+            }
+            el.replaceChildren(...copies);
           }
-          el.replaceChildren(...copies);
+          for (const c of el.children) {
+            const w = want.find((x) => x.id === c.dataset.tmCard);
+            if (!w) continue;
+            setOrder(c, w.order);
+            setIf(c.style, 'marginBlock', flat ? FLAT_MARGIN : '');
+          }
         },
       );
     }
@@ -1173,8 +1267,13 @@
       );
     }
 
-    function renderReset(grid, count) {
-      const want = new Map(count ? [['reset', `${count} moved in this browser only. `]] : []);
+    function renderReset(grid, count, ordered) {
+      const parts = [];
+      if (count) parts.push(`${count} moved`);
+      if (ordered) parts.push('order changed');
+      const want = new Map(
+        parts.length ? [['reset', `${parts.join(', ')} in this browser only. `]] : [],
+      );
       syncChildren(
         grid,
         'tm-dnd-reset',
@@ -1188,6 +1287,8 @@
               if (rec.proj === here) delete moved[id];
             }
             saveMoves();
+            delete orders[here];
+            store(KEYS.order, orders);
             render();
           });
           el.append(document.createTextNode(''), button);
@@ -1225,9 +1326,14 @@
       const p = plan(grid, proj(), present);
       setIf(rules, 'textContent', p.css);
       renderHeads(grid, p.heads);
-      renderHolders(grid, p.holders, p.movedIn, present);
+      renderHolders(grid, p.holders, present);
       renderMores(grid, p.mores);
-      renderReset(grid, p.recs.length);
+      renderReset(
+        grid,
+        p.recs.length,
+        Object.keys(orders[proj()] || {}).some((l) => orderOf(proj(), l).length),
+      );
+      lastSeqs = p.seqs;
     }
     function schedule() {
       if (queued) return;
@@ -1270,6 +1376,24 @@
     const endDrag = () => {
       drag = null;
       bar.classList.remove('on');
+      setIf(mark, 'textContent', '');
+    };
+    // The card (or copy) below the pointer that is not the dragged card:
+    // { id, after }. after: the pointer is in the lower half of the card.
+    const targetCard = (e) => {
+      const el = e.target instanceof Element && e.target.closest(`${SEL.card}, ${SEL.copy}`);
+      const id = el && (el.dataset.homeCard || el.dataset.tmCard);
+      if (!id || !SAFE.test(id) || !drag || id === drag.id) return null;
+      const r = el.getBoundingClientRect();
+      return { id, after: e.clientY > r.top + r.height / 2 };
+    };
+    // The threads of a section in order: from the last render, or from the
+    // cards of the page when the script did not arrange that section.
+    const seqOf = (label) => {
+      if (lastSeqs.has(label)) return [...lastSeqs.get(label)];
+      const grid = getGrid();
+      const sec = grid && realSections(grid).get(label);
+      return sec ? [...sec.querySelectorAll(SEL.card)].map((c) => c.dataset.homeCard) : [];
     };
     // For a copy, the browser can use the full Threads pane as the drag
     // picture. Give it a picture of only this card.
@@ -1315,6 +1439,17 @@
         if (!drag) return;
         const label = targetLabel(e.target);
         for (const c of bar.children) c.classList.toggle('over', c.dataset.label === label);
+        // Show a line above or below the card where the thread will go.
+        const t = label && targetCard(e);
+        if (t && !mark.isConnected) document.head.appendChild(mark);
+        setIf(
+          mark,
+          'textContent',
+          t
+            ? `[data-home-card="${t.id}"],[data-tm-card="${t.id}"]` +
+                `{box-shadow:0 ${t.after ? 2 : -2}px 0 0 ${CHROME_LIGHT.active} !important}`
+            : '',
+        );
         if (!label) return;
         e.preventDefault(); // permit the drop here
         e.stopPropagation();
@@ -1325,9 +1460,23 @@
         if (!label) return;
         e.preventDefault();
         e.stopPropagation();
+        const t = targetCard(e);
+        // The section that shows the thread now.
+        const now = moved[drag.id] ? moved[drag.id].to : drag.home;
         if (label === RESET || label === drag.home) delete moved[drag.id];
-        else moved[drag.id] = { to: label, home: drag.home, proj: proj(), html: drag.html };
+        else if (label !== now) {
+          moved[drag.id] = { to: label, home: drag.home, proj: proj(), html: drag.html };
+        }
         saveMoves();
+        if (t && label !== RESET) {
+          // A drop on a card: put the thread before or after that card.
+          const seq = seqOf(label).filter((id) => id !== drag.id);
+          const i = seq.indexOf(t.id);
+          if (i >= 0) {
+            seq.splice(i + (t.after ? 1 : 0), 0, drag.id);
+            setOrderOf(proj(), label, seq);
+          }
+        }
         endDrag();
         render();
       },
@@ -1338,8 +1487,9 @@
     }
     // Keep the same state in other tabs.
     window.addEventListener('storage', (e) => {
-      if (e.key !== KEYS.moves) return;
-      moved = readMoves(e.newValue);
+      if (e.key === KEYS.moves) moved = readMoves(e.newValue);
+      else if (e.key === KEYS.order) orders = parse(e.newValue);
+      else return;
       schedule();
     });
     // The page draws the list again and again: render after each change.
