@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub – timeline tweaks
 // @namespace    riley.github.tweaks
-// @version      0.10
+// @version      0.11
 // @description  Hide bot comments, collapse long commit runs, and give GitHub a Slack look (Sea Glass theme)
 // @match        https://github.com/*
 // @run-at       document-start
@@ -68,6 +68,8 @@
   // render, so the result of each render is the same for the same page.
   const HIDDEN = 'tm-gh-hidden';
   const CTRL = 'tm-gh-ctrl';
+  // The timeline item of a bot comment (hide-bot-comments adds this class).
+  const BOT = 'tm-gh-bot';
 
   // ---- Helpers ----------------------------------------------------------
   const store = {
@@ -529,6 +531,17 @@ ${PR_DESCRIPTION} {
 ${PR_DESCRIPTION}:hover {
   background: transparent !important;
 }
+/* A bot comment: a thin border, as the PR description has, and no
+   highlight on hover. It shows which text is from a bot. */
+.js-discussion .${BOT} .timeline-comment,
+.${BOT} ${ISSUE_ROW} {
+  border: 1px solid var(--borderColor-default) !important;
+  border-radius: 8px !important;
+}
+.js-discussion .${BOT} .timeline-comment:hover,
+.${BOT} ${ISSUE_ROW}:hover {
+  background: transparent !important;
+}
 /* The avatar of a PR comment: 36px, with a 12px space before the text */
 ${PR_AVATAR} {
   left: -64px !important;
@@ -760,7 +773,10 @@ ${ISSUE_BODY_BOX}:hover {
 
         renderers.push((timeline) => {
           const bots = timeline.filter((t) => t.kind === 'bot');
-          for (const t of bots) t.el.classList.toggle(HIDDEN, hide);
+          for (const t of bots) {
+            t.el.classList.toggle(HIDDEN, hide);
+            t.el.classList.add(BOT); // for the border of a bot comment
+          }
 
           const anchor =
             document.querySelector(ISSUE_LIST) ||
