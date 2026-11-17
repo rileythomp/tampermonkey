@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub – timeline tweaks
 // @namespace    riley.github.tweaks
-// @version      0.12
+// @version      0.13
 // @description  Hide bot comments, collapse long commit runs, and give GitHub a Slack look (Sea Glass theme)
 // @match        https://github.com/*
 // @run-at       document-start
@@ -531,21 +531,16 @@ ${PR_DESCRIPTION} {
 ${PR_DESCRIPTION}:hover {
   background: transparent !important;
 }
-/* A bot comment: a thin border, as the PR description has, and no
-   highlight on hover. It shows which text is from a bot. */
-.js-discussion .${BOT} .timeline-comment,
-.${BOT} ${ISSUE_ROW} {
+/* Each comment: a thin border, as the PR description has, and no
+   highlight on hover. */
+${PR_COMMENT},
+${ISSUE_ROW}:has(${ISSUE_HEADER}) {
   border: 1px solid var(--borderColor-default) !important;
   border-radius: 8px !important;
 }
-.js-discussion .${BOT} .timeline-comment:hover,
-.${BOT} ${ISSUE_ROW}:hover {
+${PR_COMMENT}:hover,
+${ISSUE_ROW}:has(${ISSUE_HEADER}):hover {
   background: transparent !important;
-}
-/* The comment in a review: its text starts where the text of the review
-   line starts, not below the review badge. */
-.js-discussion .TimelineItem-body > .timeline-comment-group {
-  margin-left: 9px !important;
 }
 /* The avatar of a PR comment: 36px, with a 12px space before the text */
 ${PR_AVATAR} {
